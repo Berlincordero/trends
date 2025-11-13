@@ -1,4 +1,4 @@
-// app/register.tsx — Registro compacto (#Trends) con radios jade + links legales
+ // app/register.tsx — Registro compacto (#Trends) con radios jade + links legales
 import React, { useState } from "react";
 import {
   View,
@@ -9,18 +9,20 @@ import {
   TouchableOpacity,
   KeyboardAvoidingView,
   Platform,
+  Modal,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useFonts, Pacifico_400Regular } from "@expo-google-fonts/pacifico";
-import { endpoints, postForm } from "../lib/api";
+// 👉 Usamos la función correcta del API
+import { registerWithProfile } from "../lib/api";
+// 👉 Instala el datepicker (Expo):  npx expo install @react-native-community/datetimepicker
+import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 
 /* ====== Ajustes rápidos ====== */
 const HEADER_TOP_SPACING = 70; // baja/sube logo+eslogan
-
-// Tamaño del logo/eslogan
 const BRAND_SIZE = 44;
-const SUB_SIZE   = 18;
+const SUB_SIZE = 18;
 /* ============================= */
 
 const BRAND = "Trends";
@@ -36,7 +38,18 @@ const JADE = "#6FD9C5";
 const INPUT_HEIGHT = 40;
 const GAP_BLOCK = 12;
 
-type Gender = "male" | "female" | "custom";
+// Backend espera sex: "male" | "female" | "other"
+type Gender = "male" | "female" | "other";
+
+/* Helpers de fecha */
+const toApiDate = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+const toDisplayDate = (d: Date) =>
+  new Intl.DateTimeFormat("es-CR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(d);
 
 /* Radio (bolita + label) más pequeño */
 function Radio({
@@ -72,13 +85,18 @@ function Radio({
 }
 
 export default function RegisterScreen() {
-  const [username, setUsername]   = useState("");
-  const [email, setEmail]         = useState("");
-  const [password, setPassword]   = useState("");
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [birthdate, setBirthdate] = useState("");
-  const [gender, setGender]       = useState<Gender>("male");
-  const [loading, setLoading]     = useState(false);
+
+  // 🔽 ahora la fecha es un Date, no string
+  const [birthdate, setBirthdate] = useState<Date | null>(null);
+  const [gender, setGender] = useState<Gender>("male");
+  const [loading, setLoading] = useState(false);
+
+  // iOS: control del modal
+  const [showDateIOS, setShowDateIOS] = useState(false);
 
   const router = useRouter();
   const [fontsLoaded] = useFonts({ Pacifico_400Regular });
@@ -86,10 +104,28 @@ export default function RegisterScreen() {
 
   const validate = () => {
     if (!username.trim()) return "Ingresa un usuario";
-    if (!email.trim() || !/^\S+@\S+\.\S+$/.test(email.trim())) return "Ingresa un correo válido";
+    if (!email.trim() || !/^\S+@\S+\.\S+$/.test(email.trim()))
+      return "Ingresa un correo válido";
     if (!password) return "Ingresa una contraseña";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(birthdate.trim())) return 'Fecha inválida. Usa "YYYY-MM-DD"';
+    if (!birthdate) return "Elige tu fecha de nacimiento";
     return null;
+  };
+
+  const openDatePicker = () => {
+    const initial = birthdate ?? new Date(2000, 0, 1);
+    const maximum = new Date(); // no permitir fechas futuras
+    if (Platform.OS === "android") {
+      DateTimePickerAndroid.open({
+        value: initial,
+        mode: "date",
+        maximumDate: maximum,
+        onChange: (_, d) => {
+          if (d) setBirthdate(d);
+        },
+      });
+    } else {
+      setShowDateIOS(true);
+    }
   };
 
   const handleRegister = async () => {
@@ -97,26 +133,25 @@ export default function RegisterScreen() {
     if (err) return Alert.alert("Faltan datos", err);
     try {
       setLoading(true);
-      const res = await postForm(endpoints.register(), {
+
+      // ✅ Usamos el endpoint correcto del backend (JSON)
+      //   - birth_date: "YYYY-MM-DD"
+      //   - sex: "male" | "female" | "other"
+      await registerWithProfile({
         username: username.trim(),
         email: email.trim(),
         password,
-        birthdate: birthdate.trim(),
-        gender,
+        birth_date: birthdate ? toApiDate(birthdate) : undefined,
+        sex: gender,
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        const msg =
-          (typeof data?.detail === "string" && data.detail) ||
-          (Array.isArray(data?.detail) && data.detail[0]?.msg) ||
-          "No se pudo crear la cuenta";
-        throw new Error(msg);
-      }
-      Alert.alert("¡Listo!", "Cuenta creada. Inicia sesión para continuar.", [
-        { text: "OK", onPress: () => router.replace("/login") },
-      ]);
+
+      // registerWithProfile guarda el token en AsyncStorage
+      Alert.alert("¡Bienvenido/a!", "Tu cuenta fue creada.");
+      // Llévalo a la raíz o a tus tabs principales, ya con sesión iniciada:
+      router.replace("/");
     } catch (e: any) {
-      Alert.alert("Error al registrarse", e?.message || "No se pudo conectar con el servidor");
+      // El helper ya trae el texto de error del backend si se puede
+      Alert.alert("Error al registrarse", e?.message || "No se pudo registrar");
     } finally {
       setLoading(false);
     }
@@ -130,11 +165,18 @@ export default function RegisterScreen() {
       <View style={[styles.screen, { backgroundColor: BG_COLOR }]}>
         {/* Header centrado — puedes bajar/subir con HEADER_TOP_SPACING */}
         <View style={[styles.header, { marginTop: HEADER_TOP_SPACING }]}>
-          <Text style={[styles.brandText, { fontSize: BRAND_SIZE, lineHeight: BRAND_SIZE * 1.18 }]}>
+          <Text
+            style={[
+              styles.brandText,
+              { fontSize: BRAND_SIZE, lineHeight: BRAND_SIZE * 1.18 },
+            ]}
+          >
             <Text style={{ marginRight: 24 }}>#</Text>
             <Text>{BRAND}</Text>
           </Text>
-          <Text style={[styles.subText, { fontSize: SUB_SIZE, lineHeight: SUB_SIZE * 1.25 }]}>
+          <Text
+            style={[styles.subText, { fontSize: SUB_SIZE, lineHeight: SUB_SIZE * 1.25 }]}
+          >
             {SUBTITLE}
           </Text>
         </View>
@@ -204,32 +246,71 @@ export default function RegisterScreen() {
             </View>
           </View>
 
-          {/* Fecha de nacimiento */}
+          {/* Fecha de nacimiento (picker) */}
           <View style={{ marginTop: GAP_BLOCK }}>
-            <View style={styles.inputRow}>
-              <Ionicons name="calendar-outline" size={16} color={PLACEHOLDER} style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Fecha de nacimiento (YYYY-MM-DD)"
-                placeholderTextColor={PLACEHOLDER}
-                value={birthdate}
-                onChangeText={setBirthdate}
-                keyboardType={Platform.select({ ios: "numbers-and-punctuation", android: "numeric" })}
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="done"
-                editable={!loading}
-              />
-            </View>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={openDatePicker}
+              disabled={loading}
+            >
+              <View style={styles.inputRow}>
+                <Ionicons
+                  name="calendar-outline"
+                  size={16}
+                  color={PLACEHOLDER}
+                  style={styles.inputIcon}
+                />
+                <Text
+                  style={[
+                    styles.input,
+                    {
+                      color: birthdate ? "#fff" : PLACEHOLDER,
+                      fontWeight: birthdate ? "800" : "700",
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {birthdate
+                    ? toDisplayDate(birthdate) // dd/MM/yyyy
+                    : "Fecha de nacimiento"}
+                </Text>
+                <Ionicons name="chevron-down" size={16} color={PLACEHOLDER} />
+              </View>
+            </TouchableOpacity>
           </View>
+
+          {/* iOS modal del picker */}
+          <Modal transparent visible={showDateIOS} animationType="fade" onRequestClose={() => setShowDateIOS(false)}>
+            <View style={styles.modalBackdrop}>
+              <View style={styles.modalCard}>
+                <Text style={styles.modalTitle}>Elige tu fecha</Text>
+                <DateTimePicker
+                  value={birthdate ?? new Date(2000, 0, 1)}
+                  mode="date"
+                  display="spinner"
+                  maximumDate={new Date()}
+                  onChange={(_, d) => d && setBirthdate(d)}
+                  style={{ alignSelf: "stretch" }}
+                />
+                <View style={styles.modalActions}>
+                  <TouchableOpacity style={[styles.modalBtn, { backgroundColor: "rgba(255,255,255,0.08)" }]} onPress={() => setShowDateIOS(false)}>
+                    <Text style={[styles.modalBtnText, { color: "#E5E7EA" }]}>Cancelar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.modalBtn, { backgroundColor: JADE }]} onPress={() => setShowDateIOS(false)}>
+                    <Text style={[styles.modalBtnText, { color: "#000" }]}>Listo</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
 
           {/* Género (una sola línea) */}
           <View style={{ marginTop: GAP_BLOCK }}>
             <Text style={styles.groupLabel}>Género</Text>
             <View style={styles.radiosRowOneLine}>
-              <Radio label="Masculino"    selected={gender === "male"}   onPress={() => setGender("male")} />
-              <Radio label="Femenino"     selected={gender === "female"} onPress={() => setGender("female")} />
-              <Radio label="Personalizado" selected={gender === "custom"} onPress={() => setGender("custom")} />
+              <Radio label="Masculino" selected={gender === "male"} onPress={() => setGender("male")} />
+              <Radio label="Femenino" selected={gender === "female"} onPress={() => setGender("female")} />
+              <Radio label="Personalizado" selected={gender === "other"} onPress={() => setGender("other")} />
             </View>
           </View>
 
@@ -253,7 +334,7 @@ export default function RegisterScreen() {
             <Text style={styles.legalLink} onPress={() => router.push("/cookies")}>Política de cookies</Text>.
           </Text>
 
-          {/* Link login */}
+          {/* Link login (por si quiere ir manualmente) */}
           <TouchableOpacity style={styles.linkBtn} onPress={() => router.replace("/login")} disabled={loading}>
             <Text style={styles.linkText}>¿Ya tienes cuenta? Inicia sesión</Text>
           </TouchableOpacity>
@@ -274,7 +355,7 @@ const styles = StyleSheet.create({
 
   header: { alignItems: "center", marginBottom: 6 },
   brandText: { fontFamily: "Pacifico_400Regular", color: "#fff", textAlign: "center" },
-  subText:   { fontFamily: "Pacifico_400Regular", color: "#fff", textAlign: "center", opacity: 0.96 },
+  subText: { fontFamily: "Pacifico_400Regular", color: "#fff", textAlign: "center", opacity: 0.96 },
 
   card: {
     backgroundColor: INPUT_BG,
@@ -309,7 +390,15 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   radio: { flexDirection: "row", alignItems: "center" },
-  radioDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 2, alignItems: "center", justifyContent: "center", marginRight: 6 },
+  radioDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 6,
+  },
   radioDotInner: { width: 6, height: 6, borderRadius: 3, backgroundColor: JADE },
   radioLabel: { fontSize: 12, fontWeight: "800", letterSpacing: 0.2 },
 
@@ -326,4 +415,29 @@ const styles = StyleSheet.create({
 
   footer: { textAlign: "center", color: "#C7CFD9", fontSize: 12, marginTop: 6 },
   footerBold: { fontWeight: "900", color: "#FFFFFF" },
+
+  // Modal iOS
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    justifyContent: "flex-end",
+  },
+  modalCard: {
+    backgroundColor: "#0D0F12",
+    padding: 16,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  modalTitle: { color: "#fff", fontWeight: "900", fontSize: 14, marginBottom: 8, alignSelf: "center" },
+  modalActions: { flexDirection: "row", gap: 10, marginTop: 10 },
+  modalBtn: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalBtnText: { fontWeight: "900", fontSize: 13 },
 });

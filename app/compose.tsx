@@ -1,5 +1,5 @@
 // app/compose.tsx
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,8 +9,8 @@ import {
   TextInput,
   ActivityIndicator,
   LayoutChangeEvent,
-  Dimensions,
   ImageSourcePropType,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -19,7 +19,8 @@ import * as ImagePicker from "expo-image-picker";
 import { Video, ResizeMode, AVPlaybackStatus } from "expo-av";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFonts, Pacifico_400Regular } from "@expo-google-fonts/pacifico";
-import { authGetProfile, BASE } from "../lib/api";
+import LottieView from "lottie-react-native";
+import { authGetProfile, BASE, publishPost } from "../lib/api";
 import PublishOptionsMenu from "./components/PublishOptionsMenu";
 
 // ---------- types ----------
@@ -61,6 +62,7 @@ export default function ComposeScreen() {
   const [barWidth, setBarWidth] = useState(1);
   const [immersive, setImmersive] = useState(false);
   const [text, setText] = useState("");
+  const [publishing, setPublishing] = useState(false); // 👈 estado de publicación
 
   // refs para playback
   const lastPlaybackRef = useRef<{ position: number; playing: boolean } | null>(
@@ -95,7 +97,6 @@ export default function ComposeScreen() {
 
   const toggleImmersiveSafe = useCallback(() => {
     if (isVideo(picked)) {
-      // no condicionar hooks, solo lógica dentro
       snapshotPlayback().finally(() => setImmersive((v) => !v));
     } else {
       setImmersive((v) => !v);
@@ -143,7 +144,6 @@ export default function ComposeScreen() {
   );
 
   const onCollage = useCallback(() => {
-    // placeholder estable (no lo borres para que la firma de hooks no cambie)
     pickMedia();
   }, [pickMedia]);
 
@@ -172,14 +172,37 @@ export default function ComposeScreen() {
     if (isVideo(picked)) restorePlayback();
   }, [immersive, picked, restorePlayback]);
 
-  // memo derivados (no cambian el orden de hooks)
+  // memo derivados
   const durationMs =
     (status && "durationMillis" in status && status.durationMillis) || 0;
   const positionMs =
     (status && "positionMillis" in status && status.positionMillis) || 0;
   const pct = durationMs > 0 ? positionMs / durationMs : 0;
 
-  // early return OK (todos los hooks ya se declararon)
+  // publicar
+  const onPublish = useCallback(async () => {
+    if (publishing) return; // evita doble tap
+    if (!picked) return;
+    if (!isVideo(picked)) {
+      Alert.alert("Solo video", "Selecciona un video para publicar en el feed.");
+      return;
+    }
+    try {
+      setPublishing(true); // 👈 muestra Lottie
+      // ✅ Pausa el preview antes de subir (evita doble reproducción)
+      await videoRef.current?.pauseAsync().catch(() => {});
+      await publishPost(
+        { uri: picked.uri, type: "video/mp4", name: "video.mp4" },
+        text || undefined
+      );
+      router.replace("/feed"); // el nuevo post será el primero
+    } catch (e: any) {
+      Alert.alert("Error", e?.message ?? "No se pudo publicar");
+      setPublishing(false); // en error, ocultar overlay
+    }
+  }, [picked, text, router, publishing]);
+
+  // early return
   if (loading || !fontsLoaded) {
     return (
       <View style={[styles.fill, { justifyContent: "center", alignItems: "center" }]}>
@@ -195,6 +218,7 @@ export default function ComposeScreen() {
         style={styles.backBtn}
         onPress={() => router.back()}
         hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        disabled={publishing}
       >
         <Ionicons name="chevron-back" size={26} color="#fff" />
       </TouchableOpacity>
@@ -216,8 +240,12 @@ export default function ComposeScreen() {
       </View>
 
       {!!picked && (
-        <TouchableOpacity style={styles.publishBtn} onPress={() => router.back()}>
-          <Text style={styles.publishTxt}>Publicar</Text>
+        <TouchableOpacity
+          style={[styles.publishBtn, publishing && { opacity: 0.6 }]}
+          onPress={onPublish}
+          disabled={publishing}
+        >
+          <Text style={styles.publishTxt}>{publishing ? "Publicando…" : "Publicar"}</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -236,6 +264,7 @@ export default function ComposeScreen() {
         scrollEnabled
         textAlignVertical="top"
         underlineColorAndroid="transparent"
+        editable={!publishing}
       />
     </View>
   ) : null;
@@ -261,6 +290,7 @@ export default function ComposeScreen() {
             placeholderTextColor="rgba(255,255,255,0.9)"
             style={styles.textOverlay}
             multiline
+            editable={!publishing}
           />
         </View>
       </>
@@ -279,6 +309,8 @@ export default function ComposeScreen() {
               shouldPlay
               isLooping
               onPlaybackStatusUpdate={onStatusUpdate}
+              progressUpdateIntervalMillis={250}
+              onError={(e) => console.warn("COMPOSE_VIDEO_ERROR (immersive)", e)}
             />
           </View>
         </View>
@@ -294,6 +326,8 @@ export default function ComposeScreen() {
           shouldPlay
           isLooping
           onPlaybackStatusUpdate={onStatusUpdate}
+          progressUpdateIntervalMillis={250}
+          onError={(e) => console.warn("COMPOSE_VIDEO_ERROR", e)}
         />
         <View pointerEvents="box-none" style={styles.textOverlayWrap}>
           <TextInput
@@ -303,6 +337,7 @@ export default function ComposeScreen() {
             placeholderTextColor="rgba(255,255,255,0.9)"
             style={styles.textOverlay}
             multiline
+            editable={!publishing}
           />
         </View>
       </>
@@ -355,6 +390,21 @@ export default function ComposeScreen() {
           />
         </>
       )}
+
+      {/* Overlay Lottie mientras publica */}
+      {publishing && (
+        <View style={styles.lottieOverlay} pointerEvents="auto">
+          <View style={styles.lottieCard}>
+            <LottieView
+              source={require("../assets/lottie/loader.json")}
+              autoPlay
+              loop
+              style={{ width: 180, height: 180 }}
+            />
+            <Text style={styles.loadingTxt}>Publicando…</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -380,7 +430,7 @@ function BottomControls({
       <View style={styles.bottomPills}>
         <TouchableOpacity style={styles.pill} onPress={onClear}>
           <MaterialCommunityIcons name="brush" size={18} color="#fff" />
-          <Text style={styles.pillTxt}>Limpiar</Text>
+        <Text style={styles.pillTxt}>Limpiar</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.pill, styles.pillInverse]} onPress={toggleImmersive}>
@@ -496,4 +546,28 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.25)", overflow: "hidden",
   },
   scrubFill: { height: "100%", backgroundColor: JADE },
+
+  // overlay Lottie
+  lottieOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 999,
+  },
+  lottieCard: {
+    backgroundColor: "rgba(17,17,17,0.9)",
+    borderRadius: 16,
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  loadingTxt: {
+    color: "#fff",
+    marginTop: 8,
+    fontSize: 16,
+    fontFamily: "Pacifico_400Regular",
+  },
 });

@@ -1,4 +1,3 @@
-// app/components/FeedHeader.tsx
 import React from "react";
 import { View, Image, TouchableOpacity, StyleSheet, Text } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -6,12 +5,14 @@ import { Ionicons } from "@expo/vector-icons";
 const DEFAULT_JADE = "#6FD9C5";
 
 type Props = {
+  /** ← ESTA es la prop que usas en feed.tsx */
   avatarUri?: string;
   onPressProfile?: () => void;
   onPressThink?: () => void;
   onPressMore?: () => void;
-  paddingTop: number; // insets.top + extra
-  jade?: string;      // color opcional (default jade)
+  /** requerido */
+  paddingTop: number;
+  jade?: string;
 };
 
 export default function FeedHeader({
@@ -38,7 +39,6 @@ export default function FeedHeader({
           source={
             avatarUri
               ? { uri: avatarUri }
-              // estamos en app/components → ../../assets/...
               : require("../../assets/images/avatar_neutral.png")
           }
           style={styles.avatar}
@@ -101,16 +101,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  thinkText: {
-    fontWeight: "800",
-    fontSize: 13,
-    opacity: 0.95,
-  },
-  moreBtn: {
-    marginLeft: 10,
-    height: 44,
-    width: 36,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  thinkText: { fontWeight: "800", fontSize: 13, opacity: 0.95 },
+  moreBtn: { marginLeft: 10, height: 44, width: 36, alignItems: "center", justifyContent: "center" },
 });
