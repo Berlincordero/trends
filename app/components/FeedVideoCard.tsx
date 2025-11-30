@@ -1,4 +1,10 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+} from "react";
 import {
   View,
   Text,
@@ -6,52 +12,58 @@ import {
   Image,
   TouchableOpacity,
   LayoutChangeEvent,
-  StyleProp,
-  ViewStyle,
+  ScrollView,
+  Platform,
 } from "react-native";
-import {
-  Video,
-  ResizeMode,
-  AVPlaybackStatus,
-  // El tipo puede no existir en todas las versiones; si te marca error, cámbialo por `any`
-  VideoReadyForDisplayEvent,
-} from "expo-av";
+import { Video, ResizeMode, AVPlaybackStatus } from "expo-av";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { BASE, fetchCommentsStats, toggleFeedStar } from "../../lib/api";
+import { useIsFocused } from "@react-navigation/native";
+
+import { BASE, fetchCommentsStats, toggleFeedStar, FeedPost } from "../../lib/api";
 import CommentsSheet from "./CommentsSheet";
 import PostStarsSheet from "./PostStarsSheet";
 
 const JADE = "#6FD9C5";
 const BG = "#000";
 
-// Layout
+const NEON_COLORS = ["#39FF14", "#FF6EC7", "#00FFFF", "#FFD700", "#FF00FF"];
+
 const AVATAR_SIZE = 56;
 const GUTTER = 12;
 const BETWEEN = 6;
 
-// Barra
 const BAR_H = 8;
 
-// offsets
-const RIGHT_CLEAR = 0;
-const LEFT_CLEAR = AVATAR_SIZE + 10;
-const PILL_OFFSET_ABOVE_BAR = 36;
+const SIDE_MARGIN_PORTRAIT = 12;
+const SIDE_MARGIN_LANDSCAPE = 28;
 const ICONS_GAP_BELOW = 52;
+const ICONS_ROW_MAX_WIDTH = 210;
+const CAPTION_MAX_WIDTH = "68%";
 
-// registro global simple
-let CURRENT_VIDEO: { id: number | null; ref: Video | null } = { id: null, ref: null };
+const CAPTION_MODE: "fromBottom" | "ratio" = "fromBottom";
+const CAPTION_Y_RATIO = 0.58;
+const CAPTION_GAP_OVER_BAR = 90;
 
-// botón lateral
+const CAPTION_FONT_SIZE = 12;
+const CAPTION_LINE_HEIGHT = 20;
+const CAPTION_VISIBLE_LINES = 3;
+const MIDCAPTION_PAD_V = 6;
+
+// 🔒 Regla global: solo 1 video reproduciéndose a la vez
+let CURRENT_VIDEO: { id: number | null; ref: Video | null } = {
+  id: null,
+  ref: null,
+};
+
 const TG_SIZE = 28;
 const TG_ICON_SIZE = 18;
 const TG_BG = "rgba(255,255,255,0.18)";
 const TG_BORDER = "rgba(255,255,255,0.25)";
 const TG_ICON_COLOR = "#fff";
-const TG_OFFSET_DOWN = 6;
-const TG_NUDGE_Y = -10;
 
 function normalizeCommentStats(raw: any) {
-  const commentsExplicit = raw?.total_count ?? raw?.comments_count ?? raw?.comments ?? 0;
+  const commentsExplicit =
+    raw?.total_count ?? raw?.comments_count ?? raw?.comments ?? 0;
   const repliesExplicit = raw?.replies_count ?? raw?.replies ?? 0;
   const total =
     typeof raw?.total_count === "number"
@@ -66,36 +78,50 @@ function normalizeCommentStats(raw: any) {
   };
 }
 
-export type FeedItem = {
-  id: number;
-  media: string;
-  caption?: string | null;
-  views_count: number;
-  author: { id: number; username: string; avatar?: string | null };
-  stars_count: number;
-  starred: boolean;
+function padForAndroidEmojiClip(s: string): string {
+  if (Platform.OS !== "android") return s;
+  const txt = String(s ?? "");
+  const GLYPH_PAD = "\u200A";
+  const WJ = "\u2060";
+  const safe = `${GLYPH_PAD}${txt}${WJ}${GLYPH_PAD}`;
+  return safe.length < 12 ? safe + GLYPH_PAD.repeat(2) : safe;
+}
+
+type Props = {
+  item: FeedPost;
+  autoplay?: boolean;
+  onFirstPlay?: (id: number) => void;
+  isLandscape?: boolean;
 };
 
-type Nat = { w: number; h: number; orientation: "portrait" | "landscape" | "unknown" };
+async function head(url: string) {
+  try {
+    await fetch(url, { method: "HEAD" });
+  } catch {}
+}
+
+export async function prewarmNext(absoluteUrl: string) {
+  if (!absoluteUrl) return;
+  head(absoluteUrl);
+}
 
 export default function FeedVideoCard({
   item,
   autoplay,
   onFirstPlay,
-}: {
-  item: FeedItem;
-  autoplay?: boolean;
-  onFirstPlay?: (id: number) => void;
-}) {
+  isLandscape = false,
+}: Props) {
   const videoRef = useRef<Video>(null);
+  const isFocused = useIsFocused();
 
-  const [status, setStatus] = useState<AVPlaybackStatus | null>(null);
-  const [immersive, setImmersive] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [durationMs, setDurationMs] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
   const [counted, setCounted] = useState(false);
   const [pausedByTap, setPausedByTap] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [commentsOpen, setCommentsOpen] = useState(false);
-
   const [starsOpen, setStarsOpen] = useState(false);
   const [commentStats, setCommentStats] = useState({
     comments_count: 0,
@@ -103,119 +129,54 @@ export default function FeedVideoCard({
     total_count: 0,
     stars_count: 0,
   });
-
   const [postStarsCount, setPostStarsCount] = useState<number>(
     typeof item.stars_count === "number" ? item.stars_count : 0
   );
   const [postStarred, setPostStarred] = useState<boolean>(!!item.starred);
 
-  // ======= SCRUB =======
+  const [fourSixteen, setFourSixteen] = useState(false);
+
   const barWidthRef = useRef(1);
   const wasPlayingRef = useRef(false);
   const onBarLayout = useCallback((e: LayoutChangeEvent) => {
     barWidthRef.current = Math.max(1, e.nativeEvent.layout.width);
   }, []);
-  // ======================
 
-  // ======= PERISCOPE =======
-  const [container, setContainer] = useState({ w: 0, h: 0 });
-  const [nat, setNat] = useState<Nat | null>(null);
+  const [cardH, setCardH] = useState(0);
+  const midCaptionTop = Math.round(cardH * CAPTION_Y_RATIO);
 
-  const devicePortrait = container.h >= container.w && container.h > 0 && container.w > 0;
-  const videoLandscape = nat ? nat.orientation === "landscape" || nat.w > nat.h : true;
-  const periscope = devicePortrait && videoLandscape;
+  const lastOrientationChangeRef = useRef<number>(0);
+  const wasPlayingBeforeRotateRef = useRef<boolean>(false);
+  const wasPlayingBeforeFSRef = useRef<boolean>(false);
 
-  // 👈 TIPADO CORRECTO: StyleProp<ViewStyle>
-  const videoStyle: StyleProp<ViewStyle> = periscope
-    ? ( {
-        position: "absolute",
-        width: container.h || "100%",
-        height: container.w || "100%",
-        left: (container.w - container.h) / 2 || 0,
-        top: (container.h - container.w) / 2 || 0,
-        transform: [{ rotate: "90deg" }],
-      } as ViewStyle )
-    : StyleSheet.absoluteFillObject;
-  // ==========================
+  const [hashColorIndex, setHashColorIndex] = useState(0);
+  const hashColor = NEON_COLORS[hashColorIndex];
 
-  const refreshCommentStats = useCallback(async () => {
-    try {
-      const raw = await fetchCommentsStats(item.id);
-      setCommentStats(normalizeCommentStats(raw));
-    } catch {
-      setCommentStats({ comments_count: 0, replies_count: 0, total_count: 0, stars_count: 0 });
-    }
-  }, [item.id]);
-
-  const isPlaying = !!(status && "isLoaded" in status && (status as any).isLoaded && (status as any).isPlaying);
-  const durationMs = (status && "isLoaded" in status && (status as any).isLoaded && (status as any).durationMillis) || 0;
-  const positionMs = (status && "isLoaded" in status && (status as any).isLoaded && (status as any).positionMillis) || 0;
-
-  const pct = durationMs > 0 ? positionMs / durationMs : 0;
-
-  const fmtTime = (ms: number) => {
-    const s = Math.floor(ms / 1000);
-    const m = Math.floor(s / 60);
-    const ss = s % 60;
-    return `${String(m).padStart(1, "0")}:${String(ss).padStart(2, "0")}`;
-  };
-
-  // autoplay / exclusión
   useEffect(() => {
+    const id = setInterval(
+      () => setHashColorIndex((prev) => (prev + 1) % NEON_COLORS.length),
+      10000
+    );
+    return () => clearInterval(id);
+  }, []);
+
+  // cambio de orientación
+  useEffect(() => {
+    lastOrientationChangeRef.current = Date.now();
+    if (isLandscape) {
+      setCommentsOpen(false);
+      setStarsOpen(false);
+      setFourSixteen(false);
+    }
     const v = videoRef.current;
     if (!v) return;
     (async () => {
       try {
-        if (autoplay) {
-          if (CURRENT_VIDEO.ref && CURRENT_VIDEO.id !== item.id) {
-            await CURRENT_VIDEO.ref.pauseAsync().catch(() => {});
-          }
-          CURRENT_VIDEO = { id: item.id, ref: v };
-          await v.playAsync().catch(() => {});
-          setPausedByTap(false);
+        if (isLandscape) {
+          const st = await v.getStatusAsync();
+          wasPlayingBeforeRotateRef.current = !!(st?.isLoaded && st?.isPlaying);
         } else {
-          await v.pauseAsync().catch(() => {});
-        }
-      } catch {}
-    })();
-  }, [autoplay, item.id, reloadKey]);
-
-  // contar vista
-  useEffect(() => {
-    if (autoplay && !counted && positionMs > 500) {
-      setCounted(true);
-      onFirstPlay?.(item.id);
-    }
-  }, [autoplay, counted, positionMs, item?.id, onFirstPlay]);
-
-  // cleanup
-  useEffect(() => {
-    return () => {
-      (async () => {
-        try {
-          await videoRef.current?.pauseAsync();
-          await videoRef.current?.unloadAsync();
-          if (CURRENT_VIDEO.id === item.id) CURRENT_VIDEO = { id: null, ref: null };
-        } catch {}
-      })();
-    };
-  }, [item.id]);
-
-  useEffect(() => {
-    refreshCommentStats();
-  }, [refreshCommentStats]);
-
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    (async () => {
-      try {
-        if (commentsOpen) {
-          await v.pauseAsync().catch(() => {});
-          setPausedByTap(true);
-        } else {
-          await refreshCommentStats();
-          if (autoplay) {
+          if (autoplay || wasPlayingBeforeRotateRef.current) {
             if (CURRENT_VIDEO.ref && CURRENT_VIDEO.id !== item.id) {
               await CURRENT_VIDEO.ref.pauseAsync().catch(() => {});
             }
@@ -226,9 +187,126 @@ export default function FeedVideoCard({
         }
       } catch {}
     })();
-  }, [commentsOpen, autoplay, item.id, refreshCommentStats]);
+  }, [isLandscape, autoplay, item.id]);
 
-  const toggleImmersive = () => setImmersive((v) => !v);
+  const refreshCommentStats = useCallback(async () => {
+    try {
+      const raw = await fetchCommentsStats(item.id);
+      setCommentStats(normalizeCommentStats(raw));
+    } catch {
+      setCommentStats({
+        comments_count: 0,
+        replies_count: 0,
+        total_count: 0,
+        stars_count: 0,
+      });
+    }
+  }, [item.id]);
+
+  const round500 = (n: number) => Math.floor(n / 500) * 500;
+
+  const onStatus = useCallback(
+    (s: AVPlaybackStatus) => {
+      if (!("isLoaded" in s) || !s.isLoaded) {
+        if (isLoaded) {
+          setIsLoaded(false);
+          setIsPlaying(false);
+        }
+        return;
+      }
+      setIsLoaded(true);
+      if (isPlaying !== !!s.isPlaying) setIsPlaying(!!s.isPlaying);
+
+      const d = s.durationMillis ?? 0;
+      const p = s.positionMillis ?? 0;
+      const rp = round500(p);
+
+      setDurationMs((prev) => (prev !== d ? d : prev));
+      setPositionMs((prev) => (prev !== rp ? rp : prev));
+    },
+    [isLoaded, isPlaying]
+  );
+
+  // autoplay + foco de pantalla
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    (async () => {
+      try {
+        if (!isFocused) {
+          await v.pauseAsync().catch(() => {});
+          if (CURRENT_VIDEO.id === item.id) {
+            CURRENT_VIDEO = { id: null, ref: null };
+          }
+          return;
+        }
+
+        if (autoplay) {
+          if (CURRENT_VIDEO.ref && CURRENT_VIDEO.id !== item.id) {
+            await CURRENT_VIDEO.ref.pauseAsync().catch(() => {});
+          }
+          CURRENT_VIDEO = { id: item.id, ref: v };
+          await v.playAsync().catch(() => {});
+          setPausedByTap(false);
+        } else {
+          if (Date.now() - lastOrientationChangeRef.current < 800) return;
+          await v.pauseAsync().catch(() => {});
+        }
+      } catch {}
+    })();
+  }, [autoplay, item.id, reloadKey, isFocused]);
+
+  // contar view (primeros 500ms)
+  useEffect(() => {
+    if (autoplay && !counted && positionMs > 500) {
+      setCounted(true);
+      onFirstPlay?.(item.id);
+    }
+  }, [autoplay, counted, positionMs, item.id, onFirstPlay]);
+
+  // cleanup
+  useEffect(() => {
+    return () => {
+      (async () => {
+        try {
+          await videoRef.current?.pauseAsync();
+          await videoRef.current?.unloadAsync();
+          if (CURRENT_VIDEO.id === item.id) {
+            CURRENT_VIDEO = { id: null, ref: null };
+          }
+        } catch {}
+      })();
+    };
+  }, [item.id]);
+
+  useEffect(() => {
+    refreshCommentStats();
+  }, [refreshCommentStats]);
+
+  // abrir/cerrar comentarios pausa/reanuda
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    (async () => {
+      try {
+        if (commentsOpen) {
+          await v.pauseAsync().catch(() => {});
+          setPausedByTap(true);
+        } else {
+          await refreshCommentStats();
+          if (autoplay && isFocused) {
+            if (CURRENT_VIDEO.ref && CURRENT_VIDEO.id !== item.id) {
+              await CURRENT_VIDEO.ref.pauseAsync().catch(() => {});
+            }
+            CURRENT_VIDEO = { id: item.id, ref: v };
+            await v.playAsync().catch(() => {});
+            setPausedByTap(false);
+          }
+        }
+      } catch {}
+    })();
+  }, [commentsOpen, autoplay, item.id, refreshCommentStats, isFocused]);
 
   const togglePlayPause = useCallback(async () => {
     const v = videoRef.current;
@@ -248,8 +326,11 @@ export default function FeedVideoCard({
     } catch {}
   }, [isPlaying, item.id]);
 
-  const baseUri = item.media.startsWith("http") ? item.media : `${BASE}${item.media}`;
-  const src = { uri: `${baseUri}${baseUri.includes("?") ? "&" : "?"}r=${reloadKey}` };
+  const baseUri = item.media.startsWith("http")
+    ? item.media
+    : `${BASE}${item.media}`;
+  const src =
+    reloadKey > 0 ? { uri: `${baseUri}?r=${reloadKey}` } : { uri: baseUri };
 
   const avatarUri = item.author.avatar
     ? item.author.avatar.startsWith("http")
@@ -268,7 +349,8 @@ export default function FeedVideoCard({
     [src]
   );
 
-  const displayedCommentsCount = commentStats.total_count || commentStats.comments_count || 0;
+  const displayedCommentsCount =
+    commentStats.total_count || commentStats.comments_count || 0;
 
   const handleTogglePostStar = useCallback(async () => {
     try {
@@ -278,7 +360,11 @@ export default function FeedVideoCard({
     } catch {}
   }, [item.id]);
 
-  // ======= SCRUB HANDLERS =======
+  const handleToggleFourSixteen = useCallback(() => {
+    if (isLandscape) return;
+    setFourSixteen((prev) => !prev);
+  }, [isLandscape]);
+
   const seekToPct = useCallback(
     async (p: number) => {
       if (!durationMs) return;
@@ -325,183 +411,405 @@ export default function FeedVideoCard({
       } catch {}
     }
   }, [item.id]);
-  // ===============================
+
+  const onFsUpdate = useCallback(
+    async (ev: any) => {
+      const code = ev?.nativeEvent?.fullscreenUpdate;
+      try {
+        if (code === 0) {
+          const st = await videoRef.current?.getStatusAsync();
+          wasPlayingBeforeFSRef.current = !!(st?.isLoaded && st?.isPlaying);
+        } else if (code === 3) {
+          const v = videoRef.current;
+          if (!v) return;
+          if ((autoplay || wasPlayingBeforeFSRef.current) && isFocused) {
+            if (CURRENT_VIDEO.ref && CURRENT_VIDEO.id !== item.id) {
+              await CURRENT_VIDEO.ref.pauseAsync().catch(() => {});
+            }
+            CURRENT_VIDEO = { id: item.id, ref: v };
+            await v.playAsync().catch(() => {});
+            setPausedByTap(false);
+          }
+        }
+      } catch {}
+    },
+    [autoplay, item.id, isFocused]
+  );
+
+  const fmtTime = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const ss = s % 60;
+    return `${String(m).padStart(1, "0")}:${String(ss).padStart(2, "0")}`;
+  };
+
+  const pct = durationMs > 0 ? positionMs / durationMs : 0;
+
+  const sideMargin = isLandscape ? SIDE_MARGIN_LANDSCAPE : SIDE_MARGIN_PORTRAIT;
+
+  const progressLeft = sideMargin + AVATAR_SIZE + 10;
+  const progressRight = sideMargin;
+  const timesLeft = sideMargin + AVATAR_SIZE + 10;
+  const timesRight = sideMargin;
+
+  const showBarAndTimes = !isLandscape || !isPlaying || pausedByTap;
+
+  const threeLineHeight =
+    CAPTION_LINE_HEIGHT * CAPTION_VISIBLE_LINES + MIDCAPTION_PAD_V * 2;
+
+  const nfcCaption = useMemo(() => {
+    const raw = item.caption ?? "";
+    try {
+      return typeof raw.normalize === "function" ? raw.normalize("NFC") : raw;
+    } catch {
+      return raw;
+    }
+  }, [item.caption]);
+
+  const safeCaption = useMemo(
+    () => padForAndroidEmojiClip(nfcCaption),
+    [nfcCaption]
+  );
+
+  const [captionLines, setCaptionLines] = useState(0);
+  const needsScroll = captionLines > CAPTION_VISIBLE_LINES;
+  const onCaptionTextLayout = useCallback(
+    (e: any) => {
+      const l = Array.isArray(e?.nativeEvent?.lines)
+        ? e.nativeEvent.lines.length
+        : 0;
+      if (l !== captionLines) setCaptionLines(l);
+    },
+    [captionLines]
+  );
 
   return (
     <View
       style={styles.fill}
-      onLayout={(e) =>
-        setContainer({
-          w: Math.max(1, Math.floor(e.nativeEvent.layout.width)),
-          h: Math.max(1, Math.floor(e.nativeEvent.layout.height)),
-        })
-      }
+      onLayout={(e) => setCardH(e.nativeEvent.layout.height)}
     >
-      <TouchableOpacity style={StyleSheet.absoluteFillObject} activeOpacity={1} onPress={togglePlayPause}>
-        <Video
-          key={reloadKey}
-          ref={videoRef}
-          source={src}
-          style={videoStyle}  // ✅ tipado correcto
-          resizeMode={ResizeMode.COVER}
-          shouldPlay={!!autoplay}
-          isLooping
-          onPlaybackStatusUpdate={(s: AVPlaybackStatus) => {
-            setStatus(s);
-            if ("isLoaded" in s && (s as any).isLoaded) {
-              const ns = (s as any).naturalSize as
-                | { width: number; height: number; orientation?: "portrait" | "landscape" }
-                | undefined;
-              if (ns && typeof ns.width === "number" && typeof ns.height === "number") {
-                const ori = ns.orientation || (ns.width >= ns.height ? "landscape" : "portrait");
-                setNat({ w: ns.width, h: ns.height, orientation: ori as any });
-              }
+      {/* Tap para play/pause */}
+      <TouchableOpacity
+        style={StyleSheet.absoluteFillObject}
+        activeOpacity={1}
+        onPress={togglePlayPause}
+      >
+        <View
+          style={
+            fourSixteen && !isLandscape
+              ? styles.letterboxContainer
+              : StyleSheet.absoluteFillObject
+          }
+        >
+          <Video
+            key={reloadKey}
+            ref={videoRef}
+            source={src}
+            style={
+              fourSixteen && !isLandscape
+                ? styles.letterboxVideo
+                : StyleSheet.absoluteFillObject
             }
-          }}
-          onReadyForDisplay={(e: VideoReadyForDisplayEvent | any) => {
-            const ns = e?.naturalSize || e?.nativeEvent?.naturalSize;
-            if (ns && typeof ns.width === "number" && typeof ns.height === "number") {
-              const ori = ns.orientation || (ns.width >= ns.height ? "landscape" : "portrait");
-              setNat({ w: ns.width, h: ns.height, orientation: ori });
+            resizeMode={
+              fourSixteen && !isLandscape
+                ? ResizeMode.CONTAIN
+                : ResizeMode.COVER
             }
-          }}
-          progressUpdateIntervalMillis={250}
-          onError={handleError}
-        />
+            shouldPlay={!!autoplay && isFocused}
+            isLooping
+            progressUpdateIntervalMillis={500}
+            onPlaybackStatusUpdate={onStatus}
+            onError={handleError}
+            onFullscreenUpdate={onFsUpdate}
+          />
+        </View>
 
-        {(!isPlaying || pausedByTap) && (
+        {(!isPlaying || pausedByTap) && !isLandscape && (
           <View style={styles.centerPlay}>
-            <MaterialCommunityIcons name="play-circle-outline" size={74} color="#ffffffcc" />
+            <MaterialCommunityIcons
+              name="play-circle-outline"
+              size={74}
+              color="#ffffffcc"
+            />
           </View>
         )}
       </TouchableOpacity>
 
+      {/* Overlay */}
       <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-        {/* tiempos */}
-        <View
-          style={{
-            position: "absolute",
-            left: GUTTER + LEFT_CLEAR,
-            right: GUTTER + RIGHT_CLEAR,
-            bottom: PROGRESS_BOTTOM + BAR_H + 6,
-            flexDirection: "row",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <Text style={styles.timeLabel}>{fmtTime(positionMs)}</Text>
-          <Text style={styles.timeLabel}>{durationMs ? `-${fmtTime(remainingMs)}` : "--:--"}</Text>
-        </View>
-
-        {/* barra interactiva */}
-        <View
-          style={{
-            position: "absolute",
-            left: GUTTER + LEFT_CLEAR,
-            right: GUTTER + RIGHT_CLEAR,
-            bottom: PROGRESS_BOTTOM,
-            height: BAR_H,
-            borderRadius: BAR_H / 2,
-            backgroundColor: "rgba(255,255,255,0.25)",
-            overflow: "hidden",
-          }}
-          onLayout={onBarLayout}
-          onStartShouldSetResponder={() => true}
-          onMoveShouldSetResponder={() => true}
-          onResponderGrant={(e) => onScrubGrant(e.nativeEvent.locationX || 0)}
-          onResponderMove={(e) => onScrubMove(e.nativeEvent.locationX || 0)}
-          onResponderRelease={onScrubRelease}
-        >
+        {/* tiempos y botón 4:16 */}
+        {showBarAndTimes && (
           <View
             style={{
-              height: "100%",
-              width: `${Math.max(0, Math.min(1, pct)) * 100}%`,
-              backgroundColor: JADE,
+              position: "absolute",
+              left: timesLeft,
+              right: timesRight,
+              bottom: GUTTER + AVATAR_SIZE + BETWEEN + BAR_H + 6,
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
             }}
-          />
-        </View>
+          >
+            <Text style={styles.timeLabel}>{fmtTime(positionMs)}</Text>
+            <View style={{ alignItems: "flex-end" }}>
+              {!isLandscape && (
+                <TouchableOpacity
+                  onPress={handleToggleFourSixteen}
+                  style={styles.fullscreenBtn}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.fullscreenBtnText}>4:16</Text>
+                </TouchableOpacity>
+              )}
+              <Text style={styles.timeLabel}>
+                {durationMs ? `-${fmtTime(remainingMs)}` : "--:--"}
+              </Text>
+            </View>
+          </View>
+        )}
 
-        {/* fullscreen pill */}
+        {/* barra de progreso */}
+        {showBarAndTimes && (
+          <View
+            style={{
+              position: "absolute",
+              left: progressLeft,
+              right: progressRight,
+              bottom: PROGRESS_BOTTOM,
+              height: BAR_H,
+              borderRadius: BAR_H / 2,
+              backgroundColor: "rgba(255,255,255,0.25)",
+              overflow: "hidden",
+            }}
+            onLayout={onBarLayout}
+            onStartShouldSetResponder={() => true}
+            onMoveShouldSetResponder={() => true}
+            onResponderGrant={(e) =>
+              onScrubGrant(e.nativeEvent.locationX || 0)
+            }
+            onResponderMove={(e) =>
+              onScrubMove(e.nativeEvent.locationX || 0)
+            }
+            onResponderRelease={onScrubRelease}
+          >
+            <View
+              style={{
+                height: "100%",
+                width: `${Math.max(0, Math.min(1, pct)) * 100}%`,
+                backgroundColor: JADE,
+              }}
+            />
+          </View>
+        )}
+
+        {/* Caption (solo vertical) */}
+        {!!safeCaption && !isLandscape && (
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: "absolute",
+              left: sideMargin,
+              right: sideMargin,
+              ...(CAPTION_MODE === "fromBottom"
+                ? {
+                    bottom:
+                      GUTTER +
+                      AVATAR_SIZE +
+                      BETWEEN +
+                      CAPTION_GAP_OVER_BAR,
+                  }
+                : { top: midCaptionTop }),
+            }}
+          >
+            {needsScroll ? (
+              <ScrollView
+                style={{
+                  height: threeLineHeight,
+                  maxHeight: threeLineHeight,
+                  alignSelf: "flex-start",
+                }}
+                contentContainerStyle={{
+                  alignItems: "flex-start",
+                  paddingVertical: 1,
+                }}
+                removeClippedSubviews={false}
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={false}
+                scrollEventThrottle={16}
+              >
+                <View style={styles.captionBubble}>
+                  <Text
+                    style={[
+                      styles.captionText,
+                      Platform.OS === "android"
+                        ? ({ textBreakStrategy: "simple" } as any)
+                        : null,
+                    ]}
+                    allowFontScaling={false}
+                    onTextLayout={onCaptionTextLayout}
+                  >
+                    {safeCaption}
+                  </Text>
+                </View>
+              </ScrollView>
+            ) : (
+              <View style={{ alignSelf: "flex-start" }}>
+                <View style={styles.captionBubble}>
+                  <Text
+                    style={[
+                      styles.captionText,
+                      Platform.OS === "android"
+                        ? ({ textBreakStrategy: "simple" } as any)
+                        : null,
+                    ]}
+                    allowFontScaling={false}
+                    onTextLayout={onCaptionTextLayout}
+                  >
+                    {safeCaption}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Botonera derecha */}
         <View
           style={{
             position: "absolute",
-            right: GUTTER,
-            bottom: PROGRESS_BOTTOM + BAR_H + PILL_OFFSET_ABOVE_BAR,
-          }}
-        >
-          <TouchableOpacity style={styles.pillSm} onPress={() => setImmersive((v) => !v)} activeOpacity={0.9}>
-            <MaterialCommunityIcons name={immersive ? "fullscreen-exit" : "fullscreen"} size={16} color="#fff" />
-          </TouchableOpacity>
-        </View>
-
-        {/* fila de iconos */}
-        <View
-          style={{
-            position: "absolute",
-            right: GUTTER,
-            bottom: PROGRESS_BOTTOM - (BAR_H + ICONS_GAP_BELOW),
+            right: sideMargin,
+            bottom:
+              GUTTER +
+              AVATAR_SIZE +
+              BETWEEN -
+              (BAR_H + ICONS_GAP_BELOW),
+            maxWidth: ICONS_ROW_MAX_WIDTH,
             flexDirection: "row",
+            justifyContent: "space-between",
             alignItems: "flex-end",
-            gap: 18,
           }}
         >
-          {/* ⭐ post stars */}
           <View style={styles.iconCol}>
-            <TouchableOpacity activeOpacity={0.9} onPress={handleTogglePostStar} style={{ alignItems: "center" }}>
-              <MaterialCommunityIcons name={postStarred ? "star" : "star-outline"} size={22} color={postStarred ? JADE : "#fff"} />
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={handleTogglePostStar}
+              style={{ alignItems: "center" }}
+            >
+              <MaterialCommunityIcons
+                name={postStarred ? "star" : "star-outline"}
+                size={22}
+                color={postStarred ? JADE : "#fff"}
+              />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setStarsOpen(true)} style={styles.countPill} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <TouchableOpacity
+              onPress={() => setStarsOpen(true)}
+              style={styles.countPill}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
               <Text style={styles.countText}>{postStarsCount}</Text>
             </TouchableOpacity>
           </View>
 
-          {/* 💬 comments */}
-          <TouchableOpacity style={styles.iconCol} activeOpacity={0.9} onPress={() => setCommentsOpen(true)}>
-            <MaterialCommunityIcons name="comment-outline" size={22} color="#fff" />
+          <TouchableOpacity
+            style={[styles.iconCol, { marginLeft: 12 }]}
+            activeOpacity={0.9}
+            onPress={() => setCommentsOpen(true)}
+          >
+            <MaterialCommunityIcons
+              name="comment-outline"
+              size={22}
+              color="#fff"
+            />
             <View style={styles.countPill}>
               <Text style={styles.countText}>{displayedCommentsCount}</Text>
             </View>
           </TouchableOpacity>
 
-          {/* share (placeholder) */}
-          <View style={styles.iconCol}>
-            <MaterialCommunityIcons name="share-variant" size={22} color="#fff" />
+          <View style={[styles.iconCol, { marginLeft: 12 }]}>
+            <MaterialCommunityIcons
+              name="share-variant"
+              size={22}
+              color="#fff"
+            />
             <View style={styles.countPill}>
               <Text style={styles.countText}>0</Text>
             </View>
           </View>
         </View>
 
-        {/* avatar + textos */}
-        <View style={{ position: "absolute", left: GUTTER, bottom: GUTTER, maxWidth: "72%" }}>
-          <View style={styles.bubble}>
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatar} />
-            ) : (
-              <Image source={require("../../assets/images/avatar_neutral.png")} style={styles.avatar} />
-            )}
+        {/* Pie con avatar, nombre y vistas */}
+        <View
+          style={{
+            position: "absolute",
+            left: sideMargin,
+            right: sideMargin,
+            bottom: GUTTER,
+            flexDirection: "row",
+            alignItems: "flex-end",
+          }}
+        >
+          <View style={{ maxWidth: CAPTION_MAX_WIDTH, flexShrink: 1 }}>
+            <View style={styles.bubble}>
+              {avatarUri ? (
+                <Image source={{ uri: avatarUri }} style={styles.avatar} />
+              ) : (
+                <Image
+                  source={require("../../assets/images/avatar_neutral.png")}
+                  style={styles.avatar}
+                />
+              )}
+            </View>
+
+            <Text style={styles.postLabel}>Publicación</Text>
+
+            <View style={styles.sideBtnWrap}>
+              <TouchableOpacity style={styles.sideBtn} activeOpacity={0.9}>
+                <MaterialCommunityIcons
+                  name="send-circle-outline"
+                  size={TG_ICON_SIZE}
+                  color={TG_ICON_COLOR}
+                />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.authorName} numberOfLines={1}>
+              <Text style={[styles.authorName, { color: hashColor }]}>#</Text>{" "}
+              {item.author.username}
+            </Text>
+
+            <View style={styles.viewsRow}>
+              <Text
+                style={styles.views}
+              >{`${item.views_count} vistas`}</Text>
+              <MaterialCommunityIcons
+                name="account-plus"
+                size={16}
+                color="#fff"
+                style={{ opacity: 0.9 }}
+              />
+            </View>
           </View>
 
-          <View style={styles.sideBtnWrap}>
-            <TouchableOpacity style={styles.sideBtn} activeOpacity={0.9}>
-              <MaterialCommunityIcons name="send-circle-outline" size={TG_ICON_SIZE} color={TG_ICON_COLOR} />
-            </TouchableOpacity>
-          </View>
-
-          <Text style={styles.caption} numberOfLines={2}>
-            {item.caption || "Publicación"}
-          </Text>
-
-          <View style={styles.viewsRow}>
-            <Text style={styles.views}>{`${item.views_count} vistas`}</Text>
-            <MaterialCommunityIcons name="account-plus" size={16} color="#fff" style={{ opacity: 0.9 }} />
-          </View>
+          <View style={{ flex: 1 }} />
         </View>
       </View>
 
-      {/* modales */}
-      <CommentsSheet visible={commentsOpen} onClose={() => setCommentsOpen(false)} postId={item.id} accentColor={JADE} />
-      <PostStarsSheet visible={starsOpen} onClose={() => setStarsOpen(false)} postId={item.id} />
+      {/* Sheets comentarios / estrellas */}
+      {!isLandscape && (
+        <>
+          <CommentsSheet
+            visible={commentsOpen}
+            onClose={() => setCommentsOpen(false)}
+            postId={item.id}
+            accentColor={JADE}
+          />
+          <PostStarsSheet
+            visible={starsOpen}
+            onClose={() => setStarsOpen(false)}
+            postId={item.id}
+          />
+        </>
+      )}
     </View>
   );
 }
@@ -510,10 +818,21 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: BG },
   centerPlay: {
     position: "absolute",
-    left: 0, right: 0, top: 0, bottom: 0,
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
     alignItems: "center",
     justifyContent: "center",
   },
+  letterboxContainer: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#000",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  letterboxVideo: { width: "112%", aspectRatio: 16 / 9 },
+
   bubble: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -521,7 +840,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.5)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 8,
+    marginBottom: 4,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.2)",
   },
@@ -530,6 +849,15 @@ const styles = StyleSheet.create({
     height: AVATAR_SIZE - 8,
     borderRadius: (AVATAR_SIZE - 8) / 2,
   },
+
+  postLabel: { color: "#fff", fontSize: 11, opacity: 0.9, marginBottom: 2 },
+  authorName: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 2,
+  },
+
   iconCol: { alignItems: "center", gap: 4 },
   countPill: {
     backgroundColor: "rgba(0,0,0,0.55)",
@@ -543,13 +871,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   countText: { color: "#fff", fontSize: 11, fontWeight: "700" },
-  caption: { color: "#fff", fontWeight: "800", marginTop: 2, textAlign: "left" },
-  viewsRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2 },
+
+  viewsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 2,
+  },
   views: { color: "#fff", opacity: 0.9, textAlign: "left" },
+
   sideBtnWrap: {
     position: "absolute",
     left: AVATAR_SIZE - (TG_SIZE - 6),
-    top: AVATAR_SIZE - TG_SIZE / 2 + TG_OFFSET_DOWN + TG_NUDGE_Y,
+    top: AVATAR_SIZE - TG_SIZE / 2 + 6 - 10,
   },
   sideBtn: {
     width: TG_SIZE,
@@ -561,16 +895,45 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  pillSm: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    height: 26,
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.25)",
+
+  timeLabel: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+    opacity: 0.95,
   },
-  timeLabel: { color: "#fff", fontSize: 11, fontWeight: "700", opacity: 0.95 },
+  fullscreenBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.7)",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    marginBottom: 4,
+  },
+  fullscreenBtnText: { color: "#fff", fontSize: 10, fontWeight: "700" },
+
+  captionBubble: {
+    alignSelf: "flex-start",
+    maxWidth: "82%",
+    backgroundColor: "rgba(0,0,0,0.25)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.16)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: MIDCAPTION_PAD_V,
+    paddingRight: 12,
+    overflow: "visible",
+    minHeight: CAPTION_LINE_HEIGHT + MIDCAPTION_PAD_V,
+  },
+  captionText: {
+    fontSize: CAPTION_FONT_SIZE,
+    lineHeight: CAPTION_LINE_HEIGHT,
+    color: "#fff",
+    fontWeight: Platform.OS === "android" ? "500" : "800",
+    includeFontPadding: Platform.OS === "android",
+    textShadowColor: Platform.OS === "android" ? "transparent" : "#000",
+    textShadowRadius: Platform.OS === "android" ? 0 : 6,
+    textShadowOffset: { width: 0, height: 0 },
+  },
 });

@@ -5,9 +5,10 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Image,
+  ImageBackground,
   ImageSourcePropType,
   Dimensions,
+  Platform,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
@@ -17,7 +18,7 @@ type Props = {
   onPickMedia: () => void;
   onCamera: () => void;
   onTextPlusFile: () => void;
-  onCollage: () => void;        // ← NUEVO
+  onCollage: () => void;
   menuBg?: ImageSourcePropType; // imagen de fondo opcional
 };
 
@@ -30,11 +31,17 @@ export default function PublishOptionsMenu({
 }: Props) {
   return (
     <View style={styles.wrap}>
-      {/* Fondo a pantalla completa (sin cortes) */}
+      {/* Fondo a pantalla completa, difuminado */}
       {menuBg && (
         <View style={styles.bgWrap} pointerEvents="none">
-          <Image source={menuBg} style={styles.bgImg} resizeMode="cover" />
-          <View style={styles.scrim} />
+          <ImageBackground
+            source={menuBg}
+            style={styles.bgImg}
+            resizeMode="cover"
+            blurRadius={Platform.OS === "ios" ? 20 : 10} // ← DIFUMINADO
+          >
+            <View style={styles.scrim} />
+          </ImageBackground>
         </View>
       )}
 
@@ -51,10 +58,9 @@ export default function PublishOptionsMenu({
 
         <TouchableOpacity style={styles.option} onPress={onTextPlusFile}>
           <Feather name="file-plus" size={20} color={JADE} />
-          <Text style={styles.optionTxt}>Texto + archivo</Text>
+          <Text style={styles.optionTxt}>Texto</Text>
         </TouchableOpacity>
 
-        {/* NUEVA opción: Collage */}
         <TouchableOpacity style={styles.option} onPress={onCollage}>
           <Feather name="grid" size={20} color={JADE} />
           <Text style={styles.optionTxt}>Collage</Text>
@@ -66,10 +72,14 @@ export default function PublishOptionsMenu({
 
 const styles = StyleSheet.create({
   wrap: { flex: 1 },
-  // Contenedor de fondo absoluto para que no quede a la mitad
+
+  // Contenedor de fondo absoluto
   bgWrap: {
     position: "absolute",
-    top: 0, right: 0, bottom: 0, left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
   },
   bgImg: {
     width: "100%",
@@ -79,6 +89,7 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.35)",
   },
+
   center: {
     flex: 1,
     justifyContent: "center",
@@ -98,7 +109,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     gap: 10,
   },
-  // ← Cambio: usar la misma fuente Pacifico
   optionTxt: {
     color: "#fff",
     fontSize: 18,
@@ -107,4 +117,3 @@ const styles = StyleSheet.create({
     textAlignVertical: "center",
   },
 });
-  

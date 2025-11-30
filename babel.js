@@ -5,9 +5,11 @@ module.exports = function (api) {
     presets: ["babel-preset-expo"],
     plugins: [
       "expo-router/babel",
-      // 👇 estos dos al final
-      "react-native-reanimated/plugin",
+       "react-native-reanimated/plugin",
+      // si usas worklets, va antes
       "react-native-worklets/plugin",
+      // 👇 ESTE SIEMPRE VA AL FINAL
+     
     ],
   };
 };

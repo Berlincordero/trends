@@ -1,8 +1,9 @@
+// app/components/FeedHeader.tsx
 import React from "react";
 import { View, Image, TouchableOpacity, StyleSheet, Text } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
-const DEFAULT_JADE = "#6FD9C5";
+const DEFAULT_JADE = "#fdfdfdff";
 
 type Props = {
   /** ← ESTA es la prop que usas en feed.tsx */

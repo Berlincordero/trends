@@ -3,6 +3,7 @@ import "react-native-gesture-handler";
 // 👇 ESTE PRIMERO SIEMPRE
 import "react-native-reanimated";
 
+
 import React from "react";
 import { View, ActivityIndicator } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
