@@ -19,7 +19,12 @@ import { Video, ResizeMode, AVPlaybackStatus } from "expo-av";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
 
-import { BASE, fetchCommentsStats, toggleFeedStar, FeedPost } from "../../lib/api";
+import {
+  BASE,
+  fetchCommentsStats,
+  toggleFeedStar,
+  FeedPost,
+} from "../../lib/api";
 import CommentsSheet from "./CommentsSheet";
 import PostStarsSheet from "./PostStarsSheet";
 
@@ -54,6 +59,17 @@ let CURRENT_VIDEO: { id: number | null; ref: Video | null } = {
   id: null,
   ref: null,
 };
+
+// 👇 Export para poder pausar desde otras pantallas (feed.tsx)
+export function pauseCurrentVideo() {
+  if (!CURRENT_VIDEO.ref) return;
+  (async () => {
+    try {
+      await CURRENT_VIDEO.ref?.pauseAsync();
+    } catch {}
+    CURRENT_VIDEO = { id: null, ref: null };
+  })();
+}
 
 const TG_SIZE = 28;
 const TG_ICON_SIZE = 18;

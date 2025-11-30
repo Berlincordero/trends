@@ -9,7 +9,7 @@ type Props = {
   value: TabKey;
   onChange: (tab: TabKey) => void;
   jade?: string;
-  onPressHeart?: () => void;   // 👈 NUEVO
+  onPressHeart?: () => void;   // 👈 para abrir feelings
 };
 
 const DEFAULT_JADE = "#e9e9e9ff";

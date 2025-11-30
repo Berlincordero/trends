@@ -31,7 +31,10 @@ import {
 } from "../lib/api";
 import FeedHeader from "./components/FeedHeader";
 import FeedTabs, { TabKey } from "./components/FeedTabs";
-import FeedVideoCard, { prewarmNext } from "./components/FeedVideoCard";
+import FeedVideoCard, {
+  prewarmNext,
+  pauseCurrentVideo, // 👈 NUEVO
+} from "./components/FeedVideoCard";
 import FeedImageCard from "./components/FeedImageCard";
 import ContentOptionsSheet from "./components/ContentOptionsSheet";
 
@@ -231,8 +234,11 @@ export default function FeedScreen() {
             value={tab}
             onChange={setTab}
             jade={JADE}
-            // 👇 cuando se toca el corazón
-            onPressHeart={() => router.push("/feelings")}
+            // 👇 cuando se toca el corazón, primero pausamos el video
+            onPressHeart={() => {
+              pauseCurrentVideo();      // 👈 pausa lo que esté sonando
+              router.push("/feelings"); // 👈 navega a feelings
+            }}
           />
         </View>
       )}

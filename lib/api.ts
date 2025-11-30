@@ -557,3 +557,49 @@ export async function toggleCommentStar(
 
 /* ------------------------------- GIFS EXTRA ------------------------------ */
 // … (resto igual que ya lo tenías)
+/* ------------------------------- GIFS EXTRA ------------------------------ */
+export type GifItem = { id: string; title?: string; url: string; width?: number; height?: number };
+
+function mapTenorResponseToGifItems(raw: any): GifItem[] {
+  if (!raw) return [];
+  const results = Array.isArray(raw) ? raw : raw.results || raw.items || [];
+  return results
+    .map((r: any) => {
+      if (r && typeof r.url === "string" && !r.media_formats) {
+        return {
+          id: String(r.id ?? r.url),
+          title: r.title || "",
+          url: toAbsolute(r.url) || r.url,
+          width: r.width,
+          height: r.height,
+        } as GifItem;
+      }
+      const mf = r?.media_formats || {};
+      const chosen =
+        mf.tinygif || mf.gif || mf.mediumgif || (mf ? (Object.values(mf) as any[])[0] : undefined);
+      if (!chosen?.url) return null;
+      return {
+        id: String(r.id),
+        title: r.content_description || r.title || "",
+        url: toAbsolute(chosen.url) || chosen.url,
+        width: Array.isArray(chosen.dims) ? chosen.dims[0] : undefined,
+        height: Array.isArray(chosen.dims) ? chosen.dims[1] : undefined,
+      } as GifItem;
+    })
+    .filter(Boolean) as GifItem[];
+}
+
+export async function fetchTrendingGifs(limit = 16): Promise<GifItem[]> {
+  const token = await getTokenOrThrow();
+  const res = await safeFetch(endpoints.gifsTrending(token, limit));
+  if (!res.ok) return [];
+  const data = await res.json();
+  return mapTenorResponseToGifItems(data);
+}
+export async function searchGifs(q: string, limit = 16): Promise<GifItem[]> {
+  const token = await getTokenOrThrow();
+  const res = await safeFetch(endpoints.gifsSearch(token, q, limit));
+  if (!res.ok) return [];
+  const data = await res.json();
+  return mapTenorResponseToGifItems(data);
+}

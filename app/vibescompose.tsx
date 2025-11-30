@@ -1,5 +1,10 @@
 // app/vibescompose.tsx
-import React, { useCallback, useEffect, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   View,
   Text,
@@ -14,14 +19,14 @@ import {
   ScrollView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
-import { Video, ResizeMode } from "expo-av";
+import { Audio, Video, ResizeMode } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 import { useFonts, Pacifico_400Regular } from "@expo-google-fonts/pacifico";
-
 import { authGetProfile, BASE, publishClip } from "../lib/api";
+import { MUSIC_TRACKS, type MusicTrack } from "./music";
 
 type Picked =
   | { kind: "image"; uri: string }
@@ -30,25 +35,34 @@ type Picked =
 
 const BG = "#000";
 const JADE = "#6FD9C5";
-
-// 👉 altura del card de preview (ajusta aquí si quieres más / menos alto)
 const PREVIEW_CARD_HEIGHT = 420;
 
 export default function VibesComposeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const isIOS = Platform.OS === "ios";
 
-  const [fontsLoaded] = useFonts({ Pacifico_400Regular });
+  const [fontsLoaded] = useFonts({
+    Pacifico_400Regular,
+  });
 
   const [avatar, setAvatar] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [picked, setPicked] = useState<Picked>(null);
   const [uploading, setUploading] = useState(false);
 
-  // 👉 texto en la burbuja
+  // texto en la burbuja
   const [textBubble, setTextBubble] = useState("");
-  // 👉 mostrar / ocultar la burbuja
   const [showTextBubble, setShowTextBubble] = useState(false);
+  const [isEditingText, setIsEditingText] = useState(false);
+
+  // refs
+  const scrollRef = useRef<ScrollView | null>(null);
+  const textInputRef = useRef<TextInput | null>(null);
+
+  // música
+  const [selectedTrack, setSelectedTrack] = useState<MusicTrack | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   // cargar avatar
   useEffect(() => {
@@ -71,6 +85,16 @@ export default function VibesComposeScreen() {
     })();
   }, [router]);
 
+  // limpiar sonido al desmontar
+  useEffect(() => {
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
+    };
+  }, []);
+
   const handlePickMedia = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) return;
@@ -86,6 +110,7 @@ export default function VibesComposeScreen() {
     } as any);
 
     if (res.canceled) return;
+
     const asset = res.assets?.[0];
     if (!asset?.uri) return;
 
@@ -96,50 +121,110 @@ export default function VibesComposeScreen() {
         : { kind: "image", uri: asset.uri }
     );
 
-    // 👉 cuando cambias de media se resetea la burbuja
+    // reset burbuja
     setTextBubble("");
     setShowTextBubble(false);
+    setIsEditingText(false);
   }, []);
 
-  const handlePublish = useCallback(async () => {
-    if (uploading) return;
-    if (!picked) {
-      Alert.alert(
-        "Selecciona algo",
-        "Elige una imagen o un video para tu vibra."
-      );
-      return;
-    }
+  // reproducir / parar canción
+  const handleSelectTrack = useCallback(
+    async (track: MusicTrack | null) => {
+      setSelectedTrack(track);
 
-    try {
-      setUploading(true);
-
-      let file: { uri: string; name?: string; type?: string };
-
-      if (picked.kind === "image") {
-        file = {
-          uri: picked.uri,
-          type: "image/jpeg",
-          name: "vibe.jpg",
-        };
-      } else {
-        file = {
-          uri: picked.uri,
-          type: "video/mp4",
-          name: "vibe.mp4",
-        };
+      // sincronizar con AsyncStorage
+      try {
+        if (track) {
+          await AsyncStorage.setItem("selectedMusicTrackId", track.id);
+        } else {
+          await AsyncStorage.removeItem("selectedMusicTrackId");
+        }
+      } catch (e) {
+        console.warn("Error guardando música seleccionada", e);
       }
 
-      // TODO: si quieres enviar también el texto de la burbuja al backend,
-      // aquí podrías incluir "textBubble" en el payload.
-      await publishClip(file);
-      Alert.alert("Listo", "Tu vibra se publicó correctamente.");
-      router.back();
-    } catch (e: any) {
-      Alert.alert("Error", e?.message ?? "No se pudo publicar la vibra");
-      setUploading(false);
-    }
-  }, [picked, uploading, router]);
+      // detener sonido anterior
+      try {
+        if (soundRef.current) {
+          await soundRef.current.stopAsync();
+          await soundRef.current.unloadAsync();
+          soundRef.current = null;
+        }
+      } catch (e) {
+        console.warn("Error al detener sonido anterior", e);
+      }
+
+      if (!track) return;
+
+      try {
+        const { sound } = await Audio.Sound.createAsync(track.file, {
+          shouldPlay: true,
+          isLooping: true,
+        });
+        soundRef.current = sound;
+      } catch (e) {
+        console.warn("Error al cargar sonido", e);
+        Alert.alert("Error", "No se pudo reproducir esta canción.");
+      }
+    },
+    []
+  );
+
+  // leer canción guardada cada vez que la pantalla se enfoca
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        try {
+          const id = await AsyncStorage.getItem("selectedMusicTrackId");
+          const track = id
+            ? MUSIC_TRACKS.find((t) => t.id === id) ?? null
+            : null;
+          await handleSelectTrack(track);
+        } catch (e) {
+          console.warn("Error leyendo música seleccionada", e);
+        }
+      })();
+
+      // opcional: al salir de esta pantalla, parar audio
+      return () => {
+        if (soundRef.current) {
+          soundRef.current.stopAsync().catch(() => {});
+        }
+      };
+    }, [handleSelectTrack])
+  );
+
+  const handlePublish = useCallback(
+    async () => {
+      if (uploading) return;
+      if (!picked) {
+        Alert.alert(
+          "Selecciona algo",
+          "Elige una imagen o un video para tu vibra."
+        );
+        return;
+      }
+
+      try {
+        setUploading(true);
+        let file: { uri: string; name?: string; type?: string };
+
+        if (picked.kind === "image") {
+          file = { uri: picked.uri, type: "image/jpeg", name: "vibe.jpg" };
+        } else {
+          file = { uri: picked.uri, type: "video/mp4", name: "vibe.mp4" };
+        }
+
+        await publishClip(file);
+        Alert.alert("Listo", "Tu vibra se publicó correctamente.");
+        router.back();
+      } catch (e: any) {
+        Alert.alert("Error", e?.message ?? "No se pudo publicar la vibra");
+        setUploading(false);
+      }
+    },
+    [picked, uploading, router]
+  );
 
   if (loading || !fontsLoaded) {
     return (
@@ -149,213 +234,264 @@ export default function VibesComposeScreen() {
     );
   }
 
-  return (
-    <KeyboardAvoidingView
+  const scrollContent = (
+    <ScrollView
+      ref={scrollRef}
       style={styles.fill}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      // 👉 offset en iOS para no tapar el header
-      keyboardVerticalOffset={Platform.OS === "ios" ? insets.top + 16 : 0}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
     >
-      <ScrollView
-        style={styles.fill}
-        contentContainerStyle={{
-          paddingBottom: insets.bottom + 24, // 👉 espacio extra abajo, pero sin dejar huecos blancos
-        }}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Header */}
-        <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-          <TouchableOpacity
-            style={styles.backBtn}
-            onPress={() => router.back()}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            disabled={uploading}
-          >
-            <Ionicons name="chevron-back" size={24} color="#fff" />
-          </TouchableOpacity>
+      {/* Header */}
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+        <TouchableOpacity
+          style={styles.backBtn}
+          onPress={() => router.back()}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          disabled={uploading}
+        >
+          <Ionicons name="chevron-back" size={24} color="#fff" />
+        </TouchableOpacity>
 
-          <Image
-            source={
-              avatar
-                ? { uri: avatar }
-                : require("../assets/images/avatar_neutral.png")
-            }
-            style={styles.headerAvatar}
-          />
+        <Image
+          source={
+            avatar
+              ? { uri: avatar }
+              : require("../assets/images/avatar_neutral.png")
+          }
+          style={styles.headerAvatar}
+        />
+        <Text style={styles.headerTitle}>Nueva vibra</Text>
+      </View>
 
-          <Text style={styles.headerTitle}>Nueva vibra</Text>
-        </View>
+      {/* Contenido */}
+      <View style={styles.content}>
+        <Text style={styles.title}>Crea tu vibe del día ✨</Text>
+        <Text style={styles.subtitle}>
+          Sube una foto o un video, compártenos tu esencia de hoy y crea una
+          vibra única ✨.
+        </Text>
 
-        {/* Contenido */}
-        <View style={styles.content}>
-          <Text style={styles.title}>Crea tu vibe del día ✨</Text>
-          <Text style={styles.subtitle}>
-            Sube una foto o un video, compártenos tu esencia de hoy y crea una
-            vibra única ✨.
-          </Text>
+        {/* Card preview */}
+        <View style={styles.previewCard}>
+          {!picked && (
+            <View style={styles.previewPlaceholderWrap}>
+              <Text style={styles.previewPlaceholder}>
+                Aquí verás la vista previa{"\n"}de tu foto o video
+              </Text>
 
-          {/* CARD de preview */}
-          <View style={styles.previewCard}>
-            {!picked && (
-              <View style={styles.previewPlaceholderWrap}>
-                <Text style={styles.previewPlaceholder}>
-                  Aquí verás la vista previa{"\n"}de tu foto o video
-                </Text>
-              </View>
-            )}
-
-            {picked && (
-              <View style={styles.previewMediaWrapper}>
-                {picked.kind === "image" ? (
-                  <Image
-                    source={{ uri: picked.uri }}
-                    style={styles.previewMedia}
-                    resizeMode="contain" // 👉 siempre se ve la imagen completa
-                  />
-                ) : (
-                  <Video
-                    source={{ uri: picked.uri }}
-                    style={styles.previewMedia}
-                    resizeMode={ResizeMode.CONTAIN} // 👉 siempre se ve el video completo
-                    shouldPlay
-                    useNativeControls
-                  />
-                )}
-
-                {/* 👉 Burbuja de texto sobre la imagen / video */}
-                {showTextBubble && (
-                  <View style={styles.textBubble}>
-                    <TextInput
-                      style={styles.textBubbleInput}
-                      value={textBubble}
-                      onChangeText={setTextBubble}
-                      placeholder="Escribe algo..."
-                      placeholderTextColor="rgba(255,255,255,0.7)"
-                      multiline
-                      numberOfLines={2}        // 👉 altura base pensada para ~2 líneas
-                      scrollEnabled={true}     // 👉 si hay más texto, se hace scroll dentro
-                    />
-                  </View>
-                )}
-              </View>
-            )}
-          </View>
-
-          {/* Botones */}
-          <View style={styles.buttonsRow}>
-            {/* Fila de herramientas: A, tijeras, música, # */}
-            <View style={styles.toolsRow}>
-              {/* A: abre/activa la burbuja */}
+              {/* botón + para subir foto/video dentro del card */}
               <TouchableOpacity
-                style={styles.toolBtn}
-                activeOpacity={0.9}
-                onPress={() => {
-                  if (!picked) {
-                    Alert.alert(
-                      "Primero agrega una foto o video",
-                      "Para agregar texto necesitas seleccionar una imagen o video."
-                    );
-                    return;
-                  }
-                  setShowTextBubble(true);
-                }}
-                disabled={uploading}
-              >
-                <Text style={styles.toolBtnText}>A</Text>
-              </TouchableOpacity>
-
-              {/* Tijeras */}
-              <TouchableOpacity
-                style={styles.toolBtn}
-                activeOpacity={0.9}
-                onPress={() =>
-                  Alert.alert(
-                    "Recortar",
-                    "Aquí podrás recortar tu foto o video. ✂️"
-                  )
-                }
-                disabled={uploading}
-              >
-                <Ionicons
-                  name="cut-outline"
-                  size={16}
-                  color="#fff"
-                />
-              </TouchableOpacity>
-
-              {/* Música */}
-              <TouchableOpacity
-                style={styles.toolBtn}
-                activeOpacity={0.9}
-                onPress={() =>
-                  Alert.alert(
-                    "Música",
-                    "Aquí podrás agregar música a tu vibra. 🎵"
-                  )
-                }
-                disabled={uploading}
-              >
-                <Ionicons
-                  name="musical-notes-outline"
-                  size={16}
-                  color="#fff"
-                />
-              </TouchableOpacity>
-
-              {/* # */}
-              <TouchableOpacity
-                style={styles.toolBtn}
-                activeOpacity={0.9}
-                onPress={() =>
-                  Alert.alert(
-                    "Hashtags",
-                    "Aquí podrás agregar hashtags a tu vibra. #️⃣"
-                  )
-                }
-                disabled={uploading}
-              >
-                <Text style={styles.toolBtnText}>#</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Fila con elegir foto / video y publicar */}
-            <View style={styles.actionsRow}>
-              <TouchableOpacity
-                style={styles.pickBtn}
+                style={styles.cardPickBtn}
                 activeOpacity={0.9}
                 onPress={handlePickMedia}
                 disabled={uploading}
               >
-                <Ionicons name="images" size={18} color="#000" />
-                <Text style={styles.pickBtnText}>Elegir foto / video</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.publishBtn,
-                  (!picked || uploading) && { opacity: 0.6 },
-                ]}
-                activeOpacity={0.9}
-                onPress={handlePublish}
-                disabled={!picked || uploading}
-              >
-                <Text style={styles.publishText}>
-                  {uploading ? "Publicando…" : "Publicar vibe"}
-                </Text>
+                <Ionicons name="add" size={22} color="#000" />
               </TouchableOpacity>
             </View>
+          )}
+
+          {picked && (
+            <View style={styles.previewMediaWrapper}>
+              {picked.kind === "image" ? (
+                <Image
+                  source={{ uri: picked.uri }}
+                  style={styles.previewMedia}
+                  resizeMode="contain"
+                />
+              ) : (
+                <Video
+                  source={{ uri: picked.uri }}
+                  style={styles.previewMedia}
+                  resizeMode={ResizeMode.CONTAIN}
+                  shouldPlay
+                  useNativeControls
+                  isMuted={!!selectedTrack}
+                />
+              )}
+
+              {/* Burbuja de texto */}
+              {showTextBubble && (
+                <View
+                  style={[
+                    styles.textBubble,
+                    isEditingText && styles.textBubbleEditing,
+                  ]}
+                >
+                  <TextInput
+                    ref={textInputRef}
+                    style={styles.textBubbleInput}
+                    value={textBubble}
+                    onChangeText={setTextBubble}
+                    placeholder="Escribe algo..."
+                    placeholderTextColor="rgba(255,255,255,0.7)"
+                    multiline
+                    numberOfLines={3}
+                    scrollEnabled
+                    onFocus={() => {
+                      setIsEditingText(true);
+                      setTimeout(() => {
+                        scrollRef.current?.scrollToEnd({ animated: true });
+                      }, 50);
+                    }}
+                    onBlur={() => {
+                      setIsEditingText(false);
+                    }}
+                  />
+                </View>
+              )}
+
+              {/* botón flotante + dentro del card para cambiar foto/video */}
+              <TouchableOpacity
+                style={styles.cardPickFloating}
+                activeOpacity={0.9}
+                onPress={handlePickMedia}
+                disabled={uploading}
+              >
+                <Ionicons name="add" size={20} color="#000" />
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        {/* Música seleccionada */}
+        {selectedTrack && (
+          <View style={styles.selectedMusic}>
+            <Image
+              source={selectedTrack.cover}
+              style={styles.selectedMusicAvatar}
+            />
+
+            <Text style={styles.selectedMusicText}>{selectedTrack.title}</Text>
+
+            <TouchableOpacity
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              onPress={() => handleSelectTrack(null)}
+            >
+              <Ionicons name="close" size={16} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Botones inferiores */}
+        <View style={styles.buttonsRow}>
+          {/* herramientas: A, tijeras, música, # */}
+          <View style={styles.toolsRow}>
+            {/* A */}
+            <TouchableOpacity
+              style={styles.toolBtn}
+              activeOpacity={0.9}
+              onPress={() => {
+                if (!picked) {
+                  Alert.alert(
+                    "Primero agrega una foto o video",
+                    "Para agregar texto necesitas seleccionar una imagen o video."
+                  );
+                  return;
+                }
+                if (showTextBubble) {
+                  setShowTextBubble(false);
+                  setIsEditingText(false);
+                  textInputRef.current?.blur();
+                  return;
+                }
+                setShowTextBubble(true);
+                setTimeout(() => {
+                  textInputRef.current?.focus();
+                  setTimeout(() => {
+                    scrollRef.current?.scrollToEnd({ animated: true });
+                  }, 40);
+                }, 20);
+              }}
+              disabled={uploading}
+            >
+              <Text style={styles.toolBtnText}>A</Text>
+            </TouchableOpacity>
+
+            {/* Tijeras */}
+            <TouchableOpacity
+              style={styles.toolBtn}
+              activeOpacity={0.9}
+              onPress={() =>
+                Alert.alert(
+                  "Recortar",
+                  "Aquí podrás recortar tu foto o video. ✂️"
+                )
+              }
+              disabled={uploading}
+            >
+              <Ionicons name="cut-outline" size={16} color="#fff" />
+            </TouchableOpacity>
+
+            {/* Música: abre la pantalla music.tsx */}
+            <TouchableOpacity
+              style={styles.toolBtn}
+              activeOpacity={0.9}
+              onPress={() => router.push("/music")}
+              disabled={uploading}
+            >
+              <Ionicons name="musical-notes-outline" size={16} color="#fff" />
+            </TouchableOpacity>
+
+            {/* # */}
+            <TouchableOpacity
+              style={styles.toolBtn}
+              activeOpacity={0.9}
+              onPress={() =>
+                Alert.alert(
+                  "Hashtags",
+                  "Aquí podrás agregar hashtags a tu vibra. #️⃣"
+                )
+              }
+              disabled={uploading}
+            >
+              <Text style={styles.toolBtnText}>#</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* solo botón de publicar, centrado y más delgado */}
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              style={[
+                styles.publishBtn,
+                (!picked || uploading) && { opacity: 0.5 },
+              ]}
+              activeOpacity={0.9}
+              onPress={handlePublish}
+              disabled={!picked || uploading}
+            >
+              <Text style={styles.publishText}>
+                {uploading ? "Publicando…" : "Publicar vibe"}
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      </View>
+    </ScrollView>
+  );
+
+  return (
+    <View style={styles.fill}>
+      {isIOS ? (
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior="padding"
+          keyboardVerticalOffset={insets.top + 16}
+        >
+          {scrollContent}
+        </KeyboardAvoidingView>
+      ) : (
+        scrollContent
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   fill: {
     flex: 1,
-    backgroundColor: BG, // 👉 MUY importante: fondo negro en toda la pantalla
+    backgroundColor: BG,
   },
   center: {
     justifyContent: "center",
@@ -404,8 +540,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 24,
   },
-
-  // CARD de preview
   previewCard: {
     width: "100%",
     height: PREVIEW_CARD_HEIGHT,
@@ -418,9 +552,9 @@ const styles = StyleSheet.create({
   },
   previewMediaWrapper: {
     flex: 1,
-    justifyContent: "center", // centra el media
+    justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#000", // 👉 color de fondo del área de preview
+    backgroundColor: "#000",
   },
   previewMedia: {
     width: "100%",
@@ -436,98 +570,115 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
   },
-
-  // 👉 burbuja de texto (más corta, centrada, con scroll si hay mucho texto)
+  // botón + dentro del card (estado sin media)
+  cardPickBtn: {
+    marginTop: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  // botón + flotante dentro del card (cuando ya hay media)
+  cardPickFloating: {
+    position: "absolute",
+    bottom: 16,
+    alignSelf: "center",
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    opacity: 0.9,
+  },
   textBubble: {
     position: "absolute",
-    alignSelf: "center",     // 👉 centrada horizontalmente
-    maxWidth: "70%",         // 👉 ancho máx. (pon 60%, 50% para hacerla más corta)
-    minWidth: "40%",         // 👉 ancho mínimo
-    bottom: 24,              // 👉 distancia desde abajo del video/imagen
-    paddingHorizontal: 10,   // 👉 padding horizontal dentro de la burbuja
-    paddingVertical: 4,      // 👉 padding vertical
+    alignSelf: "center",
+    maxWidth: "70%",
+    minWidth: "40%",
+    bottom: 24,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 16,
-    backgroundColor: "rgba(0,0,0,0.6)", // 👉 color de fondo de la burbuja
+    backgroundColor: "rgba(0,0,0,0.6)",
+  },
+  textBubbleEditing: {
+    bottom: PREVIEW_CARD_HEIGHT * 0.88,
   },
   textBubbleInput: {
-    color: "#fff",           // 👉 color del texto
-    fontSize: 14,            // 👉 tamaño de letra en el preview
+    color: "#fff",
+    fontSize: 14,
     textAlign: "center",
     textAlignVertical: "top",
-    maxHeight: 40,           // 👉 altura máx. (~2 líneas)
+    maxHeight: 60,
   },
-
+  selectedMusic: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "stretch",
+    justifyContent: "center",
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  selectedMusicAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    marginRight: 8,
+  },
+  selectedMusicText: {
+    color: "#fff",
+    fontSize: 13,
+    marginRight: 8,
+  },
   buttonsRow: {
     marginTop: 8,
     width: "100%",
     marginBottom: 8,
   },
-
-  // 👉 fila de herramientas (A, tijeras, música, #)
   toolsRow: {
     flexDirection: "row",
     justifyContent: "center",
-    columnGap: 8, // 👉 espacio horizontal entre los botones pequeños
-    marginBottom: 8,
+    columnGap: 8,
+    marginBottom: 12,
   },
-
-  // 👉 botón pequeño de herramienta
   toolBtn: {
-    width: 32, // 👉 tamaño del botón (ancho)
-    height: 32, // 👉 tamaño del botón (alto)
-    borderRadius: 16, // 👉 radio para hacerlo circular
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.6)", // 👉 color del borde de los botones pequeños
-    backgroundColor: "rgba(255,255,255,0.06)", // 👉 color de fondo del botón
+    borderColor: "rgba(255,255,255,0.6)",
+    backgroundColor: "rgba(255,255,255,0.06)",
     alignItems: "center",
     justifyContent: "center",
   },
-
-  // 👉 texto dentro de los botones pequeños (A y #)
   toolBtnText: {
-    color: "#fff", // 👉 color del texto
-    fontSize: 16, // 👉 tamaño de letra de A y #
+    color: "#fff",
+    fontSize: 16,
     fontWeight: "700",
   },
-
+  // fila del botón de publicar (centrado)
   actionsRow: {
-    flexDirection: "row",
     width: "100%",
-    marginTop: 4,
-    columnGap: 8, // si da error, quita esto y usa marginRight en pickBtn
-  },
-
-  // 👉 botón elegir foto / video
-  pickBtn: {
-    flex: 1,
-    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fff", // 👉 color de fondo del botón
-    borderRadius: 999,
-    paddingHorizontal: 10, // 👉 padding horizontal
-    paddingVertical: 8, // 👉 padding vertical
   },
-  pickBtnText: {
-    color: "#000", // 👉 color del texto
-    fontWeight: "700",
-    fontSize: 12, // 👉 tamaño de fuente del texto
-    marginLeft: 6,
-  },
-
-  // 👉 botón publicar vibe
+  // botón de publicar: fondo transparente, borde blanco, texto blanco
   publishBtn: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: JADE, // 👉 color de fondo del botón publicar
-    borderRadius: 999,
-    paddingHorizontal: 10,
+    paddingHorizontal: 28,
     paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#fff",
+    backgroundColor: "transparent",
   },
   publishText: {
-    color: "#111", // 👉 color del texto del botón publicar
+    color: "#fff",
     fontFamily: "Pacifico_400Regular",
-    fontSize: 14, // 👉 tamaño de fuente del texto publicar
+    fontSize: 14,
   },
 });
