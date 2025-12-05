@@ -1,5 +1,11 @@
 // app/feelings.tsx
-import React, { useEffect, useState, useMemo, useCallback } from "react";
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import {
   View,
   Text,
@@ -8,9 +14,10 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   StatusBar,
+  Animated,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useFonts, Pacifico_400Regular } from "@expo-google-fonts/pacifico";
 import { LinearGradient } from "expo-linear-gradient";
@@ -23,9 +30,55 @@ import {
   BASE,
   Clip,
   fetchMyClip,
+  fetchVibesFeed,
   isLikelyImageUrl,
   toAbsolute,
 } from "../lib/api";
+
+const BG = "#000";
+
+// tamaño base más pequeño
+const BUBBLE_SIZE = 110;
+const AVATAR_OVERLAY_SIZE = 38;
+
+// Avatar del card "Tu próximo viaje"
+const CARD_AVATAR_SIZE = 62;
+
+// Altura mínima del card de viaje
+// 🔧 Sube este valor para hacerlo más alto, bájalo para hacerlo más bajo.
+const TRAVEL_CARD_MIN_HEIGHT = 320;
+
+// ancho efectivo de cada ítem del carrusel (burbuja + margen)
+const BUBBLE_ITEM_WIDTH = BUBBLE_SIZE + 18;
+
+type VibeItem = {
+  clip: Clip | null;
+  authorId: number | "me";
+  username: string;
+  avatarUri: string | null;
+  isMe: boolean;
+};
+
+/**
+ * Normaliza cualquier ruta de avatar:
+ * - http(s)://...
+ * - "avatars/xxx.jpg"
+ * - "/media/avatars/xxx.jpg"
+ */
+function resolveAvatarUri(raw?: string | null): string | null {
+  if (!raw) return null;
+  const v = raw.trim();
+  if (!v) return null;
+  if (v.startsWith("http://") || v.startsWith("https://")) return v;
+
+  let p = v.replace(/^\/+/, ""); // quita "/" inicial
+  if (p.startsWith("media/")) {
+    // ya viene con "media/..."
+    return `${BASE}/${p}`;
+  }
+  // solo subruta dentro de /media
+  return `${BASE}/media/${p}`;
+}
 
 export default function FeelingsScreen() {
   const insets = useSafeAreaInsets();
@@ -35,43 +88,64 @@ export default function FeelingsScreen() {
   const [profile, setProfile] = useState<any>(null);
 
   const [avatar, setAvatar] = useState<string | null>(null);
-  const [clip, setClip] = useState<Clip | null>(null);
+  const [myClip, setMyClip] = useState<Clip | null>(null);
 
+  const [vibes, setVibes] = useState<Clip[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingVibes, setLoadingVibes] = useState(true);
+
   const [fontsLoaded] = useFonts({ Pacifico_400Regular });
 
-  useEffect(() => {
-    (async () => {
+  // valor animado del scroll horizontal
+  const scrollX = useRef(new Animated.Value(0)).current;
+
+  const loadEverything = useCallback(async () => {
+    setLoading(true);
+    setLoadingVibes(true);
+    try {
+      // Usuario + perfil
       try {
         const [u, p] = await Promise.all([authGetMe(), authGetProfile()]);
         setMe(u);
         setProfile(p);
 
-        const raw = p?.avatar ?? u?.avatar ?? null;
-        if (raw) {
-          const uri = String(raw).startsWith("http")
-            ? raw
-            : `${BASE}/media/${raw}`;
-          setAvatar(uri);
-        } else {
-          setAvatar(null);
-        }
-
-        // cargar último clip de vibes (si existe)
-        try {
-          const c = await fetchMyClip();
-          setClip(c ?? null);
-        } catch {
-          setClip(null);
-        }
-      } catch (e) {
+        const raw =
+          (p && (p.avatar || p.avatar_url)) ||
+          (u && (u.avatar || u.avatar_url)) ||
+          null;
+        setAvatar(resolveAvatarUri(raw));
+      } catch {
+        setMe(null);
+        setProfile(null);
         setAvatar(null);
-        setClip(null);
-      } finally {
-        setLoading(false);
       }
-    })();
+
+      // Mi último clip (para mi burbuja principal)
+      try {
+        const c = await fetchMyClip();
+        setMyClip(c ?? null);
+      } catch {
+        setMyClip(null);
+      }
+
+      // Feed global de vibes (para las demás burbujas)
+      try {
+        const feed = await fetchVibesFeed(48, 0);
+        setVibes(feed ?? []);
+      } catch {
+        setVibes([]);
+      }
+    } finally {
+      setLoading(false);
+      setLoadingVibes(false);
+    }
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadEverything();
+    }, [loadEverything])
+  );
 
   const displayName =
     profile?.display_name ||
@@ -81,25 +155,98 @@ export default function FeelingsScreen() {
     me?.nick ||
     "";
 
-  const clipMediaAbs = useMemo(() => {
-    if (!clip?.media) return null;
-    return toAbsolute(clip.media) || clip.media;
-  }, [clip]);
+  const myUserId = me?.id ?? null;
 
-  const hasClip = !!clipMediaAbs;
+  // Construimos los ítems del carrusel:
+  // - Primero la burbuja del usuario actual
+  // - Luego 1 burbuja por cada autor distinto del feed global
+  const vibeItems: VibeItem[] = useMemo(() => {
+    const items: VibeItem[] = [];
 
-  const handlePressAvatar = useCallback(() => {
-    // Si ya hay clip → abrir reproductor tipo historias
-    if (hasClip && clipMediaAbs) {
+    // 1) Mi propia burbuja
+    items.push({
+      clip: myClip,
+      authorId: myUserId ?? "me",
+      username: displayName || (me?.username ?? "Yo"),
+      avatarUri: avatar,
+      isMe: true,
+    });
+
+    // 2) Burbujas de otros autores (solo 1 clip por autor)
+    const byAuthor = new Map<number, Clip>();
+    for (const c of vibes) {
+      const authorId = c.author?.id ?? (c as any).author_id;
+      if (!authorId) continue;
+      if (myUserId && authorId === myUserId) {
+        // ya lo mostramos en la primera burbuja
+        continue;
+      }
+      if (!byAuthor.has(authorId)) {
+        byAuthor.set(authorId, c);
+      }
+    }
+
+    for (const [authorId, c] of byAuthor.entries()) {
+      // soportamos varias formas posibles de venir del backend:
+      const rawAvatar =
+        (c as any).author?.avatar ??
+        (c as any).author_avatar ??
+        (c as any).avatar ??
+        null;
+
+      const authorAvatar = resolveAvatarUri(rawAvatar);
+
+      items.push({
+        clip: c,
+        authorId,
+        username: c.author?.username ?? (c as any).author_username ?? "Usuario",
+        avatarUri: authorAvatar,
+        isMe: false,
+      });
+    }
+
+    return items;
+  }, [myClip, myUserId, displayName, me?.username, avatar, vibes]);
+
+  const handlePressBubble = useCallback(
+    (item: VibeItem) => {
+      // Si es mi burbuja y no tengo clip publicado todavía → ir a composer
+      if (item.isMe && !item.clip) {
+        router.push("/vibescompose");
+        return;
+      }
+
+      const clip = item.clip;
+      if (!clip?.media) return;
+
+      const abs = toAbsolute(clip.media) || clip.media;
+
+      // userId para que VibesPlayer pueda hacer el carrusel de ese autor
+      let targetUserId: number | null = null;
+
+      if (item.isMe && myUserId) {
+        targetUserId = myUserId;
+      } else if (typeof item.authorId === "number") {
+        targetUserId = item.authorId;
+      } else if (clip.author?.id) {
+        targetUserId = clip.author.id;
+      }
+
+      const params: Record<string, string> = {
+        media: abs,
+        clipId: String(clip.id),
+      };
+      if (targetUserId != null) {
+        params.userId = String(targetUserId);
+      }
+
       router.push({
         pathname: "/vibesplayer",
-        params: { media: clipMediaAbs },
+        params,
       });
-      return;
-    }
-    // Si no hay clip → ir a vibescompose para subir uno nuevo
-    router.push("/vibescompose");
-  }, [hasClip, clipMediaAbs, router]);
+    },
+    [router, myUserId]
+  );
 
   if (!fontsLoaded || loading) {
     return (
@@ -123,76 +270,157 @@ export default function FeelingsScreen() {
           <Ionicons name="chevron-back" size={24} color="#fff" />
         </TouchableOpacity>
 
-        <Text style={styles.title}>Clips Stories</Text>
+        <Text style={styles.headerTitle}>Clips Stories</Text>
       </View>
 
       {/* Subtítulo superior */}
-      <Text style={styles.subtitle}> Vibes</Text>
+      <Text style={styles.vibesTitle}>Vibes</Text>
 
-      {/* Círculo (Vibes) con gradient suave + texto dentro */}
-      <View style={styles.avatarWrapper}>
-        <LinearGradient
-          style={styles.playerCircle}
-          colors={["#6FD9C5", "#A1C4FD"]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-        >
-          <Text style={styles.playerCircleText}>Cual es tu vibra hoy 🌴🥥</Text>
-        </LinearGradient>
+      {/* Carrusel de burbujas (mi vibra + demás usuarios) */}
+      <View style={styles.bubblesRow}>
+        {loadingVibes && !myClip ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Animated.ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.bubblesScroll}
+            scrollEventThrottle={16}
+            onScroll={Animated.event(
+              [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+              { useNativeDriver: true }
+            )}
+          >
+            {vibeItems.map((item, index) => {
+              const clip = item.clip;
+              const mediaAbs = clip?.media
+                ? toAbsolute(clip.media) || clip.media
+                : null;
+              const isImg = mediaAbs ? isLikelyImageUrl(mediaAbs) : false;
 
-        {/* Burbuja: si hay clip → preview (imagen o video mudo); si no → avatar o placeholder */}
-        <TouchableOpacity
-          style={styles.avatarBubble}
-          activeOpacity={0.9}
-          onPress={handlePressAvatar}
-        >
-          {hasClip && clipMediaAbs ? (
-            isLikelyImageUrl(clipMediaAbs) ? (
-              <Image source={{ uri: clipMediaAbs }} style={styles.avatarImage} />
-            ) : (
-              <Video
-                source={{ uri: clipMediaAbs }}
-                style={styles.avatarImage}
-                resizeMode={ResizeMode.COVER}
-                isMuted
-                shouldPlay
-                isLooping
-              />
-            )
-          ) : avatar ? (
-            <Image source={{ uri: avatar }} style={styles.avatarImage} />
-          ) : (
-            <View style={[styles.avatarImage, styles.avatarPlaceholder]}>
-              <Ionicons name="add" size={24} color="#000" />
-            </View>
-          )}
-        </TouchableOpacity>
+              // escala según la posición en el scroll
+              const inputRange = [
+                (index - 1) * BUBBLE_ITEM_WIDTH,
+                index * BUBBLE_ITEM_WIDTH,
+                (index + 1) * BUBBLE_ITEM_WIDTH,
+              ];
+
+              const scale = scrollX.interpolate({
+                inputRange,
+                outputRange: [0.8, 1.0, 0.8],
+                extrapolate: "clamp",
+              });
+
+              const opacity = scrollX.interpolate({
+                inputRange,
+                outputRange: [0.7, 1, 0.7],
+                extrapolate: "clamp",
+              });
+
+              return (
+                <Animated.View
+                  key={`${item.isMe ? "me" : item.authorId}-${clip?.id ?? "none"}`}
+                  style={[
+                    styles.bubbleItem,
+                    { transform: [{ scale }], opacity },
+                  ]}
+                >
+                  <TouchableOpacity
+                    activeOpacity={0.9}
+                    onPress={() => handlePressBubble(item)}
+                  >
+                    <LinearGradient
+                      colors={["#6FD9C5", "#A1C4FD"]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.bubbleOuter}
+                    >
+                      <View style={styles.bubbleInner}>
+                        {mediaAbs && clip ? (
+                          isImg ? (
+                            <Image
+                              source={{ uri: mediaAbs }}
+                              style={styles.bubbleMedia}
+                            />
+                          ) : (
+                            <Video
+                              source={{ uri: mediaAbs }}
+                              style={styles.bubbleMedia}
+                              resizeMode={ResizeMode.COVER}
+                              isMuted
+                              shouldPlay
+                              isLooping
+                            />
+                          )
+                        ) : (
+                          <Text style={styles.bubblePlaceholderText}>
+                            {item.isMe
+                              ? "Cuál es tu vibra hoy 🌴🥥"
+                              : "Nueva vibra ✨"}
+                          </Text>
+                        )}
+                      </View>
+
+                      {/* Avatar pequeño como botón independiente */}
+                      <TouchableOpacity
+                        style={styles.bubbleAvatarWrap}
+                        activeOpacity={0.9}
+                        onPress={() => {
+                          if (item.isMe) {
+                            // Tocar TU avatar -> siempre abre VibesCompose
+                            router.push("/vibescompose");
+                          } else {
+                            // Otros usuarios -> comportarse como antes (abre player)
+                            handlePressBubble(item);
+                          }
+                        }}
+                      >
+                        {item.avatarUri ? (
+                          <Image
+                            source={{ uri: item.avatarUri }}
+                            style={styles.bubbleAvatar}
+                          />
+                        ) : (
+                          <Image
+                            source={require("../assets/images/avatar_neutral.png")}
+                            style={styles.bubbleAvatar}
+                          />
+                        )}
+                      </TouchableOpacity>
+                    </LinearGradient>
+                  </TouchableOpacity>
+
+                  {/* Nombre del autor */}
+                  <Text style={styles.bubbleUsername} numberOfLines={1}>
+                    {item.username}
+                  </Text>
+
+                  {/* Seguidores en común + 2 avatares pequeñitos (mock) */}
+                  <View style={styles.commonWrapper}>
+                    <Text style={styles.commonText} numberOfLines={1}>
+                      Seguidores en común
+                    </Text>
+                    <View style={styles.commonAvatarsRow}>
+                      <Image
+                        source={require("../assets/images/avatar_neutral.png")}
+                        style={styles.commonAvatarMini}
+                      />
+                      <Image
+                        source={require("../assets/images/avatar_neutral.png")}
+                        style={[styles.commonAvatarMini, { marginLeft: -6 }]}
+                      />
+                    </View>
+                  </View>
+                </Animated.View>
+              );
+            })}
+          </Animated.ScrollView>
+        )}
       </View>
 
-      {/* Bloque con nombre + seguidores */}
-      {!!displayName && (
-        <View style={styles.userBlock}>
-          <Text style={styles.userName} numberOfLines={1}>
-            {displayName}
-          </Text>
-
-          <View style={styles.followRow}>
-            <Ionicons
-              name="people"
-              size={16}
-              color="#ffffff"
-              style={styles.followIcon}
-            />
-            <Text style={styles.followText}>Seguidores: 125</Text>
-          </View>
-        </View>
-      )}
-
-      {/* Sección Rails Travel con título + Lottie justo al lado */}
+      {/* Sección Rails Trip con título + Lottie justo al lado */}
       <View style={styles.railsRow}>
         <Text style={styles.railsTitle}>Rails Trip</Text>
-
-        {/* Lottie de estrellitas pegado al texto */}
         <LottieView
           source={require("../assets/lottie/stars.json")}
           autoPlay
@@ -201,7 +429,7 @@ export default function FeelingsScreen() {
         />
       </View>
 
-      {/* Card mediano debajo de Rails Travel con avatar en el borde */}
+      {/* Card mediano debajo de Rails Trip con avatar en el borde */}
       <View style={styles.travelCardWrapper}>
         <View style={styles.travelCard}>
           <Text style={styles.travelCardTitle}>Tu próximo viaje</Text>
@@ -219,7 +447,6 @@ export default function FeelingsScreen() {
               activeOpacity={0.85}
               onPress={() => {
                 // Aquí puedes navegar a la creación de Rails
-                // router.push("/rails/create");
               }}
             >
               <Ionicons
@@ -236,7 +463,6 @@ export default function FeelingsScreen() {
               activeOpacity={0.85}
               onPress={() => {
                 // Aquí puedes abrir la cámara
-                // router.push("/camera");
               }}
             >
               <Ionicons
@@ -247,6 +473,11 @@ export default function FeelingsScreen() {
               />
               <Text style={styles.createRailsButtonText}>Abrir cámara</Text>
             </TouchableOpacity>
+          </View>
+
+          {/* Ícono de estrella debajo de los botones */}
+          <View style={styles.favoriteStarContainer}>
+            <Ionicons name="star" size={24} color="#FFD700" />
           </View>
         </View>
 
@@ -263,28 +494,15 @@ export default function FeelingsScreen() {
   );
 }
 
-// ========================
-// Tamaños de los círculos
-// ========================
-
-const AVATAR_SIZE = 130; // círculo grande (mini player)
-const INNER_AVATAR_SIZE = 62; // burbuja del avatar superior
-
-// Avatar del card
-const CARD_AVATAR_SIZE = 62;
-
-// Altura mínima del card de viaje
-const TRAVEL_CARD_MIN_HEIGHT = 260; // card alto
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: BG,
     alignItems: "center",
   },
   loadingWrap: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: BG,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -303,93 +521,109 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 8,
   },
-  title: {
+  headerTitle: {
     fontFamily: "Pacifico_400Regular",
     color: "#6FD9C5",
     fontSize: 24,
   },
-  subtitle: {
+  vibesTitle: {
     fontFamily: "Pacifico_400Regular",
     color: "#ffffff",
     fontSize: 22,
     marginTop: 12,
-    marginBottom: 24,
+    marginBottom: 16,
   },
 
-  avatarWrapper: {
-    marginTop: 8,
-    alignItems: "center",
-    justifyContent: "center",
+  /* Carrusel de burbujas */
+  bubblesRow: {
+    width: "100%",
   },
-
-  playerCircle: {
-    width: AVATAR_SIZE + 8,
-    height: AVATAR_SIZE + 8,
-    borderRadius: (AVATAR_SIZE + 8) / 2,
-    alignItems: "center",
-    justifyContent: "center",
+  bubblesScroll: {
     paddingHorizontal: 16,
+    paddingBottom: 12,
   },
-
-  playerCircleText: {
-    fontFamily: "Pacifico_400Regular",
-    fontSize: 18,
-    color: "#ffffff",
-    textAlign: "center",
+  bubbleItem: {
+    alignItems: "center",
+    marginRight: 18,
   },
-
-  avatarBubble: {
-    position: "absolute",
-    right: -INNER_AVATAR_SIZE * 0.15,
-    bottom: -INNER_AVATAR_SIZE * 0.4,
-    width: INNER_AVATAR_SIZE,
-    height: INNER_AVATAR_SIZE,
-    borderRadius: INNER_AVATAR_SIZE / 2,
-    borderWidth: 2,
-    borderColor: "#000",
+  bubbleOuter: {
+    width: BUBBLE_SIZE,
+    height: BUBBLE_SIZE,
+    borderRadius: BUBBLE_SIZE / 2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bubbleInner: {
+    width: BUBBLE_SIZE - 10,
+    height: BUBBLE_SIZE - 10,
+    borderRadius: (BUBBLE_SIZE - 10) / 2,
+    backgroundColor: "#000",
     overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
   },
-
-  avatarImage: {
+  bubbleMedia: {
     width: "100%",
     height: "100%",
-    borderRadius: INNER_AVATAR_SIZE / 2,
   },
-  avatarPlaceholder: {
-    backgroundColor: "#6FD9C5",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  // Bloque nombre + seguidores
-  userBlock: {
-    marginTop: 32,
-    alignItems: "center",
-    paddingHorizontal: 24,
-  },
-  userName: {
+  bubblePlaceholderText: {
     color: "#ffffff",
-    fontSize: 18,
-    fontWeight: "600",
+    fontSize: 13,
     textAlign: "center",
   },
-  followRow: {
-    marginTop: 6,
-    flexDirection: "row",
+  bubbleAvatarWrap: {
+    position: "absolute",
+    right: -AVATAR_OVERLAY_SIZE * 0.1,
+    bottom: -AVATAR_OVERLAY_SIZE * 0.1,
+    width: AVATAR_OVERLAY_SIZE,
+    height: AVATAR_OVERLAY_SIZE,
+    borderRadius: AVATAR_OVERLAY_SIZE / 2,
+    borderWidth: 2,
+    borderColor: "#000",
+    backgroundColor: "#000",
+    overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",
   },
-  followIcon: {
-    marginRight: 6,
+  bubbleAvatar: {
+    width: "100%",
+    height: "100%",
+    borderRadius: AVATAR_OVERLAY_SIZE / 2,
   },
-  followText: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 14,
+  bubbleUsername: {
+    marginTop: 6,
+    color: "#ffffff",
+    fontSize: 11,
+    maxWidth: BUBBLE_SIZE + 10,
+    textAlign: "center",
+  },
+
+  // Seguidores en común
+  commonWrapper: {
+    marginTop: 2,
+    alignItems: "center",
+  },
+  commonText: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 9,
+  },
+  commonAvatarsRow: {
+    flexDirection: "row",
+    marginTop: 2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  commonAvatarMini: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#000",
   },
 
   // Fila de "Rails Trip" + Lottie al lado
   railsRow: {
-    marginTop: 40,
+    marginTop: 18,
     width: "100%",
     paddingHorizontal: 24,
     flexDirection: "row",
@@ -401,7 +635,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     marginRight: 8,
   },
-
   railsLottie: {
     width: 48,
     height: 48,
@@ -409,7 +642,7 @@ const styles = StyleSheet.create({
 
   // Card mediano para Rails Travel
   travelCardWrapper: {
-    marginTop: 60,
+    marginTop: 40,
     width: "100%",
     paddingHorizontal: 24,
     alignItems: "center",
@@ -441,7 +674,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     marginTop: 4,
   },
-
   createRailsButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -460,6 +692,11 @@ const styles = StyleSheet.create({
     color: "#000",
     fontSize: 14,
     fontWeight: "700",
+  },
+
+  favoriteStarContainer: {
+    marginTop: 14, // Ajusta este valor para más o menos espacio con los botones
+    alignItems: "center",
   },
 
   travelCardAvatar: {

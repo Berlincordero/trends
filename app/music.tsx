@@ -47,6 +47,30 @@ export const MUSIC_TRACKS: MusicTrack[] = [
     file: require("../assets/audio/song4.mp3"),
     cover: require("../assets/images/music/song4.png"),
   },
+    {
+    id: "song5",
+    title: "Kafu Banton Ft Almirante – Ella",
+    file: require("../assets/audio/song5.mp3"),
+    cover: require("../assets/images/music/song5.png"),
+  },
+  {
+    id: "song6",
+    title: "Toledo – El Sarpe",
+    file: require("../assets/audio/song6.mp3"),
+    cover: require("../assets/images/music/song6.png"),
+  }
+  ,{
+    id: "song7",
+    title: "Five for Fighting – chance",
+    file: require("../assets/audio/song7.mp3"),
+    cover: require("../assets/images/music/song7.png"),
+  }
+  , {
+    id: "song8",
+    title: "Five for Fighting – ITS NOT EASY", 
+    file: require("../assets/audio/song8.mp3"),
+    cover: require("../assets/images/music/song8.png"),
+  }
 ];
 
 const BG = "#000";

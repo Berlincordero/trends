@@ -25,7 +25,7 @@ import * as ImagePicker from "expo-image-picker";
 import { Audio, Video, ResizeMode } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 import { useFonts, Pacifico_400Regular } from "@expo-google-fonts/pacifico";
-import { authGetProfile, BASE, publishClip } from "../lib/api";
+import { authGetProfile, BASE, publishClip, setClipMusic } from "../lib/api";
 import { MUSIC_TRACKS, type MusicTrack } from "./music";
 
 type Picked =
@@ -132,7 +132,7 @@ export default function VibesComposeScreen() {
     async (track: MusicTrack | null) => {
       setSelectedTrack(track);
 
-      // sincronizar con AsyncStorage
+      // sincronizar con AsyncStorage (selección global actual)
       try {
         if (track) {
           await AsyncStorage.setItem("selectedMusicTrackId", track.id);
@@ -215,7 +215,16 @@ export default function VibesComposeScreen() {
           file = { uri: picked.uri, type: "video/mp4", name: "vibe.mp4" };
         }
 
-        await publishClip(file);
+        // 1) Publicar clip en backend
+        const clip = await publishClip(file);
+
+        // 2) Guardar la canción elegida para este clip (si hay)
+        if (selectedTrack) {
+          await setClipMusic(clip.id, selectedTrack.id);
+        } else {
+          await setClipMusic(clip.id, null);
+        }
+
         Alert.alert("Listo", "Tu vibra se publicó correctamente.");
         router.back();
       } catch (e: any) {
@@ -223,7 +232,7 @@ export default function VibesComposeScreen() {
         setUploading(false);
       }
     },
-    [picked, uploading, router]
+    [picked, uploading, router, selectedTrack]
   );
 
   if (loading || !fontsLoaded) {
@@ -570,7 +579,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
   },
-  // botón + dentro del card (estado sin media)
   cardPickBtn: {
     marginTop: 16,
     width: 44,
@@ -580,7 +588,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  // botón + flotante dentro del card (cuando ya hay media)
   cardPickFloating: {
     position: "absolute",
     bottom: 16,
@@ -662,12 +669,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
   },
-  // fila del botón de publicar (centrado)
   actionsRow: {
     width: "100%",
     alignItems: "center",
   },
-  // botón de publicar: fondo transparente, borde blanco, texto blanco
   publishBtn: {
     paddingHorizontal: 28,
     paddingVertical: 8,
